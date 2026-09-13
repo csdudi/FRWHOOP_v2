@@ -31,6 +31,11 @@ final class ImuSessionFileStore {
     struct SegmentInfo { let id: String; let bucket: Int64; let bytes: Int64 }
     private struct Window: Codable { let id, deviceId: String; let from: Int64; var to: Int64? }
     private struct Record { let ts, receivedAtMs: Int64; let columns: [Int16] }
+    private struct DecodedFile {
+        let records: [Record]
+        let validEnd: Int
+        let complete: Bool
+    }
     static let shared = ImuSessionFileStore()
     /// The continuous recorder's store (Developer Options → Record 100 Hz IMU locally). A SEPARATE
     /// directory + window registry from `shared` on purpose: the rawImuSession cloud-push lane reads
@@ -89,9 +94,16 @@ final class ImuSessionFileStore {
         value.append(Window(id: id, deviceId: deviceId, from: fromMs / 1_000, to: nil)); save(value)
         try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
     }
-    func complete(id: String, toMs: Int64) {
-        flushSession(id); var value = windows()
-        if let index = value.firstIndex(where: { $0.id == id }) { value[index].to = toMs / 1_000; save(value) }
+    @discardableResult
+    func complete(id: String, toMs: Int64) -> Bool {
+        // A session must not be published complete while its final block exists only in memory. Keep
+        // the window open and let the BLE/session owner retain cleanup debt when any flush fails.
+        guard flushSession(id) else { return false }
+        var value = windows()
+        guard let index = value.firstIndex(where: { $0.id == id }) else { return false }
+        value[index].to = toMs / 1_000
+        save(value)
+        return true
     }
     func register(id: String, deviceId: String, fromMs: Int64, toMs: Int64) {
         var value = windows().filter { $0.id != id }
@@ -104,10 +116,11 @@ final class ImuSessionFileStore {
         conflicts[id] = nil
         save(windows().filter { $0.id != id })
     }
-    func prepareForRead(_ id: String) { flushSession(id) }
+    func prepareForRead(_ id: String) { _ = flushSession(id) }
 
     func deleteFiles(_ id: String, removeItem: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }) -> Bool {
-        flushSession(id); let dir = sessionDirectory(id)
+        guard flushSession(id) else { return false }
+        let dir = sessionDirectory(id)
         guard FileManager.default.fileExists(atPath: dir.path) else { return true }
         do { try removeItem(dir); return true } catch { return false }
     }
@@ -152,23 +165,33 @@ final class ImuSessionFileStore {
     /// that QUEUED a new record. Duplicate policy (FRWHOOP issue #1): an identical payload at an
     /// already-stored strap second is discarded; a DIFFERENT payload keeps the first durable value
     /// and the second is recorded as conflict evidence — never silently merged or overwritten.
+    /// Open live windows match by receipt time so the first complete one-second buffer after START
+    /// is kept even when its source ts slightly predates the session wall clock.
     private func appendRouting(deviceId: String, frame: [UInt8], receivedAtMs: Int64) -> Set<String> {
         guard let ts = Whoop5RawImu.baseTs(frame), let columns = Whoop5RawImu.rawColumns(frame) else { return [] }
+        let sourceTs = Int64(ts)
+        let receivedTs = receivedAtMs / 1_000
         var queued: Set<String> = []
-        for window in windows() where window.deviceId == deviceId && Int64(ts) >= window.from
-            && (window.to == nil || Int64(ts) <= window.to!) {
-            let bucket = Self.bucketStart(Int64(ts)), url = segmentFile(window.id, bucket)
+        for window in windows() where window.deviceId == deviceId {
+            let belongsToWindow: Bool
+            if let to = window.to {
+                belongsToWindow = sourceTs >= window.from && sourceTs <= to
+            } else {
+                belongsToWindow = receivedTs >= window.from
+            }
+            guard belongsToWindow else { continue }
+            let bucket = Self.bucketStart(sourceTs), url = segmentFile(window.id, bucket)
             var timestamps = seen[url.path] ?? scan(url)
             let digest = Self.columnsDigest(columns)
-            if let existing = timestamps[Int64(ts)] {
+            if let existing = timestamps[sourceTs] {
                 seen[url.path] = timestamps
-                if existing != digest { markConflict(window.id, Int64(ts)) }
+                if existing != digest { markConflict(window.id, sourceTs) }
                 continue
             }
-            timestamps[Int64(ts)] = digest
+            timestamps[sourceTs] = digest
             seen[url.path] = timestamps
             let pendingKey = "\(window.id)/\(bucket)"
-            pending[pendingKey, default: []].append(Record(ts: Int64(ts), receivedAtMs: receivedAtMs, columns: columns))
+            pending[pendingKey, default: []].append(Record(ts: sourceTs, receivedAtMs: receivedAtMs, columns: columns))
             if pending[pendingKey]!.count >= Self.blockSeconds { flushKey(pendingKey) }
             queued.insert(window.id)
         }
@@ -305,13 +328,14 @@ final class ImuSessionFileStore {
     }
 
     func exportSegments(_ id: String, from: Int, to: Int) -> [ExportSegment] {
-        flushSession(id)
+        guard flushSession(id) else { return [] }
         let records = Dictionary(grouping: readRecords(id, from: from, to: to, includePending: false), by: \.ts)
             .compactMap { $0.value.first }.sorted { $0.ts < $1.ts }
         return Dictionary(grouping: records) { Self.bucketStart($0.ts) }.sorted { $0.key < $1.key }.compactMap { element in
             let (bucket, rows) = element
-            guard let first = rows.first, let last = rows.last else { return nil }
-            return ExportSegment(name: "imu-\(Self.utcName(bucket)).imus", data: encode(bucket: bucket, records: rows),
+            guard let first = rows.first, let last = rows.last,
+                  let encoded = encode(bucket: bucket, records: rows) else { return nil }
+            return ExportSegment(name: "imu-\(Self.utcName(bucket)).imus", data: encoded,
                 startTs: Int(first.ts), endTs: Int(last.ts), sampleCount: rows.count * Self.sampleRate)
         }
     }
@@ -324,74 +348,158 @@ final class ImuSessionFileStore {
         return rows
     }
 
-    private func encode(bucket: Int64, records: [Record]) -> Data {
+    private func encode(bucket: Int64, records: [Record]) -> Data? {
         var result = header(bucket)
         for start in stride(from: 0, to: records.count, by: Self.blockSeconds) {
-            result.append(block(Array(records[start..<min(start + Self.blockSeconds, records.count)])))
+            guard let encoded = block(Array(records[start..<min(start + Self.blockSeconds, records.count)])) else {
+                return nil
+            }
+            result.append(encoded)
         }
         return result
     }
-    private func decode(_ data: Data) -> [Record] {
-        guard data.count >= 24, data.prefix(8) == Self.magic else { return [] }
+    private func decodeFile(_ data: Data) -> DecodedFile {
+        guard data.count >= 24, data.prefix(8) == Self.magic else {
+            return DecodedFile(records: [], validEnd: 0, complete: false)
+        }
         let bytes = [UInt8](data); var offset = 8
         _ = Int64(bigEndianBytes: bytes, at: offset); offset += 8
-        guard int32(bytes, offset) == Self.sampleRate, int32(bytes, offset + 4) == Self.axes else { return [] }
+        guard int32(bytes, offset) == Self.sampleRate, int32(bytes, offset + 4) == Self.axes else {
+            return DecodedFile(records: [], validEnd: 0, complete: false)
+        }
         offset += 8; var result: [Record] = []
-        while offset + 12 <= bytes.count {
+        var validEnd = offset
+        while offset < bytes.count {
+            let blockStart = offset
+            guard offset + 12 <= bytes.count else {
+                return DecodedFile(records: result, validEnd: validEnd, complete: false)
+            }
             let count = int32(bytes, offset), rawSize = int32(bytes, offset + 4), compressedSize = int32(bytes, offset + 8)
             offset += 12
-            guard count > 0, count <= Self.blockSeconds, rawSize > 0, compressedSize > 0,
+            let expectedRawSize = count * (20 + Self.payloadBytes)
+            guard count > 0, count <= Self.blockSeconds, rawSize == expectedRawSize, compressedSize > 0,
                   offset + compressedSize <= bytes.count,
-                  let raw = inflate(Data(bytes[offset..<offset + compressedSize]), size: rawSize) else { break }
-            offset += compressedSize; let rawBytes = [UInt8](raw); var rawOffset = 0
+                  let raw = inflate(Data(bytes[offset..<offset + compressedSize]), size: rawSize) else {
+                return DecodedFile(records: result, validEnd: blockStart, complete: false)
+            }
+            let nextOffset = offset + compressedSize
+            let rawBytes = [UInt8](raw); var rawOffset = 0
+            var blockRecords: [Record] = []
+            blockRecords.reserveCapacity(count)
             for _ in 0..<count {
-                guard rawOffset + 20 + Self.payloadBytes <= rawBytes.count else { break }
+                guard rawOffset + 20 + Self.payloadBytes <= rawBytes.count else {
+                    return DecodedFile(records: result, validEnd: blockStart, complete: false)
+                }
                 let ts = Int64(bigEndianBytes: rawBytes, at: rawOffset)
                 let received = Int64(bigEndianBytes: rawBytes, at: rawOffset + 8)
                 let length = int32(rawBytes, rawOffset + 16); rawOffset += 20
-                guard length == Self.payloadBytes, rawOffset + length <= rawBytes.count else { break }
+                guard length == Self.payloadBytes, rawOffset + length <= rawBytes.count else {
+                    return DecodedFile(records: result, validEnd: blockStart, complete: false)
+                }
                 var columns: [Int16] = []; columns.reserveCapacity(Self.sampleRate * Self.axes)
                 for index in stride(from: rawOffset, to: rawOffset + length, by: 2) {
                     columns.append(Int16(bitPattern: UInt16(rawBytes[index]) | UInt16(rawBytes[index + 1]) << 8))
                 }
-                rawOffset += length; result.append(Record(ts: ts, receivedAtMs: received, columns: columns))
+                rawOffset += length
+                blockRecords.append(Record(ts: ts, receivedAtMs: received, columns: columns))
             }
+            guard rawOffset == rawBytes.count else {
+                return DecodedFile(records: result, validEnd: blockStart, complete: false)
+            }
+            result.append(contentsOf: blockRecords)
+            offset = nextOffset
+            validEnd = offset
         }
-        return result
+        return DecodedFile(records: result, validEnd: validEnd, complete: true)
+    }
+
+    private func decode(_ data: Data) -> [Record] {
+        let decoded = decodeFile(data)
+        return decoded.complete ? decoded.records : []
     }
 
     /// Flush every pending block for the session. True iff nothing remains pending afterwards —
     /// callers on a durability-critical path (the Backfiller's flush-before-ack seam) must check it.
     @discardableResult
     private func flushSession(_ id: String) -> Bool {
-        pending.keys.filter { $0.hasPrefix("\(id)/") }.forEach { flushKey($0) }
-        return !pending.keys.contains { $0.hasPrefix("\(id)/") }
+        guard segmentFiles(id).allSatisfy({ validSegmentFile($0) }) else { return false }
+        let keys = pending.keys.filter { $0.hasPrefix("\(id)/") }
+        var succeeded = true
+        for key in keys where !flushKey(key) { succeeded = false }
+        return succeeded && !pending.keys.contains { $0.hasPrefix("\(id)/") }
+            && segmentFiles(id).allSatisfy({ validSegmentFile($0) })
     }
-    /// Append one pending block to its segment file. On ANY failure the records are restored to
-    /// `pending` (so a later flush retries them) and the failure is reported to the caller.
+
     @discardableResult
     private func flushKey(_ key: String) -> Bool {
-        guard let records = pending.removeValue(forKey: key), !records.isEmpty,
-              let tail = key.split(separator: "/").last,
-              let bucket = Int64(String(tail)) else { return true }
+        guard let tail = key.split(separator: "/").last,
+              let bucket = Int64(String(tail)) else { return false }
         let id = String(key.split(separator: "/")[0]), url = segmentFile(id, bucket)
-        try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: header(bucket)) }
-        let payload = block(records)
-        guard !payload.isEmpty, let handle = try? FileHandle(forWritingTo: url) else { pending[key] = records; return false }
-        do { try handle.seekToEnd(); try handle.write(contentsOf: payload); try handle.close(); return true }
-        catch { try? handle.close(); pending[key] = records; return false }
+        while let records = pending[key], !records.isEmpty {
+            // A transient failure leaves the complete batch pending. Later appends may grow that queue
+            // beyond blockSeconds, but the on-disk decoder deliberately rejects blocks >30. Drain only
+            // durable prefixes so one failed 30-row write cannot make every future retry unencodable.
+            let batch = Array(records.prefix(Self.blockSeconds))
+            guard let encoded = block(batch) else { return false }
+            do {
+                try FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    try header(bucket).write(to: url, options: .atomic)
+                } else if !validSegmentFile(url) {
+                    return false
+                }
+                let handle = try FileHandle(forWritingTo: url)
+                let originalOffset = try handle.seekToEnd()
+                do {
+                    try handle.write(contentsOf: encoded)
+                    try handle.synchronize()
+                    try handle.close()
+                    guard validSegmentFile(url) else {
+                        rollbackSegment(url, to: originalOffset)
+                        return false
+                    }
+                    if records.count == batch.count {
+                        pending.removeValue(forKey: key)
+                    } else {
+                        pending[key] = Array(records.dropFirst(batch.count))
+                    }
+                } catch {
+                    try? handle.truncate(atOffset: originalOffset)
+                    try? handle.synchronize()
+                    try? handle.close()
+                    return false
+                }
+            } catch {
+                // Leave this batch and every later record pending. A later flush retries without
+                // converting an encode/open/write failure into a successful empty block.
+                return false
+            }
+        }
+        return true
+    }
+
+    private func validSegmentFile(_ url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url) else { return false }
+        return decodeFile(data).complete
+    }
+
+    private func rollbackSegment(_ url: URL, to offset: UInt64) {
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        try? handle.truncate(atOffset: offset)
+        try? handle.synchronize()
     }
     private func header(_ bucket: Int64) -> Data {
         var data = Self.magic; data.appendBigEndian(bucket); data.appendBigEndian(Int32(Self.sampleRate)); data.appendBigEndian(Int32(Self.axes)); return data
     }
-    private func block(_ records: [Record]) -> Data {
+    private func block(_ records: [Record]) -> Data? {
+        guard !records.isEmpty, records.count <= Self.blockSeconds else { return nil }
         var raw = Data()
         for record in records {
             raw.appendBigEndian(record.ts); raw.appendBigEndian(record.receivedAtMs); raw.appendBigEndian(Int32(Self.payloadBytes))
             for value in record.columns { raw.append(UInt8(truncatingIfNeeded: value)); raw.append(UInt8(truncatingIfNeeded: value >> 8)) }
         }
-        guard let compressed = deflate(raw) else { return Data() }
+        guard let compressed = deflate(raw) else { return nil }
         var data = Data(); data.appendBigEndian(Int32(records.count)); data.appendBigEndian(Int32(raw.count))
         data.appendBigEndian(Int32(compressed.count)); data.append(compressed); return data
     }
@@ -434,14 +542,20 @@ extension ImuSessionFileStore: ImuSessionPushSource {
         // much history follows the cursor.
         var byTs: [Int64: Data] = [:]
         for id in ids {
-            flushSession(id)
+            // Fail closed for the whole device. Advancing the uploader cursor past a torn earlier segment
+            // would make that evidence permanently ineligible if the pending block is repaired later.
+            guard flushSession(id) else { return [] }
             for file in segmentFiles(id) {
-                guard let bucket = segmentBucket(file), bucket + Self.segmentSeconds > afterTs else { continue }
+                guard let bucket = segmentBucket(file) else { return [] }
+                guard bucket + Self.segmentSeconds > afterTs else { continue }
                 if byTs.count >= limit {
                     let cutoff = byTs.keys.sorted()[limit - 1]
                     if bucket > cutoff { break }
                 }
-                for record in decode((try? Data(contentsOf: file)) ?? Data()) where record.ts > afterTs {
+                guard let bytes = try? Data(contentsOf: file) else { return [] }
+                let decoded = decodeFile(bytes)
+                guard decoded.complete else { return [] }
+                for record in decoded.records where record.ts > afterTs {
                     guard record.columns.count == Self.sampleRate * Self.axes, byTs[record.ts] == nil else { continue }
                     var data = Data(capacity: Self.payloadBytes)
                     for value in record.columns {

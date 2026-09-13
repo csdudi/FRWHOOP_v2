@@ -6,6 +6,9 @@ import WhoopStore
 /// GroundTruthCollector: it records bounded raw-data windows with optional comments.
 @MainActor
 final class RawDataSessionStore: ObservableObject {
+    /// One process-wide owner. BLE lifecycle cleanup and the screen must mutate the same persisted
+    /// session state; a view-local store can otherwise remain "active" after background auto-stop.
+    static let shared = RawDataSessionStore()
     struct Event: Codable, Identifiable, Equatable {
         var id = UUID()
         var atMs: Int64
@@ -18,6 +21,8 @@ final class RawDataSessionStore: ObservableObject {
     struct Session: Codable, Identifiable, Equatable {
         let id: String
         let deviceId: String
+        /// CoreBluetooth source identity used to correlate a persisted stop-first cleanup debt.
+        let peripheralId: String?
         let startedAtMs: Int64
         var endedAtMs: Int64?
         var capturedStartedAtMs: Int64?
@@ -57,28 +62,78 @@ final class RawDataSessionStore: ObservableObject {
     }
 
     @discardableResult
-    func start(deviceId: String, now: Date = Date()) -> Session? {
+    func start(deviceId: String, peripheralId: String? = nil, now: Date = Date()) -> Session? {
         guard active == nil else { return nil }
         let millis = Int64(now.timeIntervalSince1970 * 1_000)
         let started = Event(atMs: millis, kind: "start")
-        let session = Session(id: String(millis), deviceId: deviceId, startedAtMs: millis,
+        let session = Session(id: String(millis), deviceId: deviceId, peripheralId: peripheralId,
+                              startedAtMs: millis,
                               endedAtMs: nil, capturedStartedAtMs: millis, capturedEndedAtMs: nil,
                               comment: "", exported: false, lastExportedAtMs: nil, events: [started])
         sessions.insert(session, at: 0)
-        persist(session)
+        guard persist(session) else {
+            sessions.removeAll { $0.id == session.id }
+            return nil
+        }
         ImuSessionFileStore.shared.start(id: session.id, deviceId: deviceId, fromMs: millis)
         return session
     }
 
-    func stop(now: Date = Date()) {
-        let activeId = active?.id
-        mutateActive { session in
-            let millis = Int64(now.timeIntervalSince1970 * 1_000)
-            session.endedAtMs = millis
-            session.capturedEndedAtMs = millis
-            session.events.append(Event(atMs: millis, kind: "stop"))
+    @discardableResult
+    func stop(sessionId: String? = nil,
+              peripheralId: String? = nil,
+              now: Date = Date()) -> Bool {
+        guard let index = sessions.firstIndex(where: { session in
+            guard session.active else { return false }
+            if let sessionId, session.id != sessionId { return false }
+            if let peripheralId {
+                if sessionId == nil { return session.peripheralId == peripheralId }
+                // Current-format rows carry the physical identity. Legacy rows may not; an exact
+                // session id still identifies them without closing some other active capture.
+                if let recorded = session.peripheralId, recorded != peripheralId { return false }
+            }
+            return true
+        }) else { return false }
+        let millis = Int64(now.timeIntervalSince1970 * 1_000)
+        let active = sessions[index]
+        // Flush the final high-rate block before publishing the terminal metadata. If it cannot be made
+        // durable, leave the session active so the BLE lifecycle retains debt and a later Stop can retry.
+        guard ImuSessionFileStore.shared.complete(id: active.id, toMs: millis) else { return false }
+        sessions[index].endedAtMs = millis
+        sessions[index].capturedEndedAtMs = millis
+        sessions[index].events.append(Event(atMs: millis, kind: "stop"))
+        let stopped = sessions[index]
+        guard persist(stopped) else {
+            sessions[index] = active
+            return false
         }
-        if let activeId { ImuSessionFileStore.shared.complete(id: activeId, toMs: Int64(now.timeIntervalSince1970 * 1_000)) }
+        return true
+    }
+
+    /// Idempotent lifecycle reconciliation used after the BLE controller has proved the stock producer
+    /// stopped. Unlike the user-facing `stop`, an already-closed matching row is success: relaunch and
+    /// reconnect cleanup must be able to publish the same terminal fact more than once without losing the
+    /// producer debt. A mismatched physical source, unknown exact id, or unattributable legacy active row
+    /// fails closed.
+    @discardableResult
+    func reconcileProducerStopped(sessionId: String? = nil,
+                                  peripheralId: String,
+                                  now: Date = Date()) -> Bool {
+        if stop(sessionId: sessionId, peripheralId: peripheralId, now: now) { return true }
+        if let sessionId {
+            guard let session = sessions.first(where: { $0.id == sessionId }), !session.active else {
+                return false
+            }
+            guard session.peripheralId == nil || session.peripheralId == peripheralId,
+                  let endedAtMs = session.endedAtMs else { return false }
+            // Also repairs a process that reached the older metadata-first close path: do not clear BLE
+            // cleanup debt until any still-pending final IMU block has been flushed successfully.
+            return ImuSessionFileStore.shared.complete(id: session.id, toMs: endedAtMs)
+        }
+        // A peripheral-only recovery may legitimately have no UI session (for example, after a process
+        // interruption left producer cleanup debt). It may
+        // not declare success while any active row remains because legacy rows lack a physical identity.
+        return active == nil
     }
 
     @discardableResult
@@ -88,7 +143,8 @@ final class RawDataSessionStore: ObservableObject {
         guard validRange(fromMs, toMs) else { return nil }
         let id = String(Int64(Date().timeIntervalSince1970 * 1_000))
         let events = [Event(atMs: fromMs, kind: "start"), Event(atMs: toMs, kind: "stop")]
-        let session = Session(id: id, deviceId: deviceId, startedAtMs: fromMs, endedAtMs: toMs,
+        let session = Session(id: id, deviceId: deviceId, peripheralId: nil,
+                              startedAtMs: fromMs, endedAtMs: toMs,
                               capturedStartedAtMs: nil, capturedEndedAtMs: nil, comment: "",
                               exported: false, lastExportedAtMs: nil, events: events)
         sessions.insert(session, at: 0); persist(session)
@@ -102,7 +158,8 @@ final class RawDataSessionStore: ObservableObject {
         guard validRange(fromMs, toMs) else { return }
         mutate(sessionId) { session in
             guard !session.active else { return }
-            session = Session(id: session.id, deviceId: session.deviceId, startedAtMs: fromMs,
+            session = Session(id: session.id, deviceId: session.deviceId,
+                              peripheralId: session.peripheralId, startedAtMs: fromMs,
                               endedAtMs: toMs, capturedStartedAtMs: session.capturedStartedAtMs,
                               capturedEndedAtMs: session.capturedEndedAtMs, comment: session.comment,
                               exported: false, lastExportedAtMs: nil, events: session.events)
@@ -177,9 +234,15 @@ final class RawDataSessionStore: ObservableObject {
         persist(sessions[index])
     }
 
-    private func persist(_ session: Session) {
-        guard let data = try? encoder.encode(session) else { return }
-        try? data.write(to: file(session.id), options: .atomic)
+    @discardableResult
+    private func persist(_ session: Session) -> Bool {
+        do {
+            let data = try encoder.encode(session)
+            try data.write(to: file(session.id), options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func file(_ id: String) -> URL { directory.appendingPathComponent("session-\(id).json") }

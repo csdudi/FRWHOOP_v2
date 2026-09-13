@@ -54,11 +54,45 @@ public enum Whoop5RawImu {
     // FRAME-absolute offsets (8-byte puffin envelope + payload).
     static let tsOff = 15, countAOff = 24, axOff = 28, ayOff = 228, azOff = 428
     static let countBOff = 630, gxOff = 640, gyOff = 840, gzOff = 1040
+    /// Packet families for which the repository has an explicit shared-v21 IMU contract. CRC and shape
+    /// alone are not semantic evidence: an unknown 1244-byte packet must remain Level-A-only.
+    static let recognizedV21PacketTypes: Set<UInt8> = [43, 47]
 
-    /// Decode a raw-IMU buffer, or nil if it isn't one. Gates on the exact length + the two in-packet
-    /// sample counts (=100) rather than the type byte, so it can't misfire on a same-type non-IMU frame.
+    /// True only for the packet family whose banked v21 contract is evidenced in retained bytes. Enum
+    /// names are not evidence: type 52 remains Level A and must conservatively count against post-stop
+    /// silence until an on-wire contract proves it is historical.
+    public static func isHistoricalPacket(_ f: [UInt8]) -> Bool {
+        guard f.count > 8 else { return false }
+        return f[8] == 47
+    }
+
+    /// Conservative post-stop producer evidence. Unlike `rawColumns`, this deliberately does not
+    /// require valid CRCs or known realtime type: an exact-size non-historical IMU-shaped frame must
+    /// keep cleanup debt alive even when corruption prevents trusted decoding.
+    public static func isCandidateRealtimePacket(_ f: [UInt8]) -> Bool {
+        f.count == bufferLength && !isHistoricalPacket(f)
+    }
+
+    /// Conservative producer evidence at the exact-notification seam, before reassembly can replace an
+    /// abandoned prefix with the next valid Puffin header. A valid header that declares the observed
+    /// 1,244-byte IMU envelope and carries a non-historical packet type is enough to disprove post-stop
+    /// silence. It is deliberately not sufficient for trusted decode or acquisition-start success.
+    public static func isCandidateRealtimeHeaderFragment(_ fragment: [UInt8]) -> Bool {
+        guard fragment.count >= 9, fragment.count < bufferLength,
+              fragment[0] == 0xAA, fragment[1] == 0x01,
+              (Int(fragment[2]) | (Int(fragment[3]) << 8)) + 8 == bufferLength,
+              crc16Modbus(fragment, 0, 6)
+                == (UInt16(fragment[6]) | (UInt16(fragment[7]) << 8)) else { return false }
+        return fragment[8] != 47
+    }
+
+    /// Decode a raw-IMU buffer, or nil if it isn't one. The complete WHOOP5 envelope and both CRCs
+    /// must validate before shape/count checks. A plausible 1244-byte corrupt frame is wire evidence,
+    /// but must never become trusted physiology or enter the interpreted IMU store.
     public static func decode(_ f: [UInt8]) -> Whoop5ImuFrame? {
         guard f.count == bufferLength,
+              verifyFrame(f, family: .whoop5).ok,
+              isRecognizedV21Envelope(f),
               u16(f, countAOff) == sampleCount, u16(f, countBOff) == sampleCount,
               gzOff + 2 * sampleCount <= f.count else { return nil }
         let baseTs = Int(u32(f, tsOff))
@@ -83,6 +117,8 @@ public enum Whoop5RawImu {
     /// time, so nothing lossy is baked into the stored bytes. Twin of Kotlin `Whoop5RawImu.rawColumns`.
     public static func rawColumns(_ f: [UInt8]) -> [Int16]? {
         guard f.count == bufferLength,
+              verifyFrame(f, family: .whoop5).ok,
+              isRecognizedV21Envelope(f),
               u16(f, countAOff) == sampleCount, u16(f, countBOff) == sampleCount,
               gzOff + 2 * sampleCount <= f.count else { return nil }
         let cols = [axOff, ayOff, azOff, gxOff, gyOff, gzOff]
@@ -98,6 +134,14 @@ public enum Whoop5RawImu {
     public static func baseTs(_ f: [UInt8]) -> Int? {
         guard f.count > tsOff + 3 else { return nil }
         return Int(u32(f, tsOff))
+    }
+
+    static func isRecognizedV21Envelope(_ f: [UInt8]) -> Bool {
+        guard f.count > 9, recognizedV21PacketTypes.contains(f[8]) else { return false }
+        // Banked type 47 carries the v21 selector at byte 9. On evidenced live type 43 that byte is a
+        // sequence, so its contract is packet type + exact length/count/offset shape, not seq == 21.
+        // Enum names alone are not enough to promote candidate types 51/52 into trusted Level B.
+        return f[8] == 47 ? f[9] == 21 : true
     }
 
     // MARK: - Little-endian readers (frame-absolute)

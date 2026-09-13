@@ -374,9 +374,20 @@ final class Collector {
         rawCapture.open(at: monotonic(), duration: seconds)
     }
 
+    @discardableResult
+    func recordValidatedWhoop5Imu(_ frame: [UInt8], deviceId explicitDeviceId: String? = nil) -> Int {
+        // `rawColumns` requires a complete WHOOP5 envelope, valid header/payload CRCs,
+        // an evidenced carrier type, and the complete 100 x 6 shape. Corrupt or
+        // unknown frames remain wire evidence but never enter interpreted storage.
+        ImuSessionFileStore.shared.append(
+            deviceId: explicitDeviceId ?? deviceId,
+            frame: frame,
+            receivedAtMs: Int64(Date().timeIntervalSince1970 * 1_000)
+        )
+    }
+
     private func recordGroundTruthImu(_ frame: [UInt8]) {
-        _ = ImuSessionFileStore.shared.append(deviceId: deviceId, frame: frame,
-            receivedAtMs: Int64(Date().timeIntervalSince1970 * 1_000))
+        _ = recordValidatedWhoop5Imu(frame)
     }
 
     /// Best-effort repair of already-archived history (FRWHOOP issue #1): scan this device's retained

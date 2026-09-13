@@ -339,6 +339,9 @@ struct StrandiOSApp: App {
                     await watch.pushLatest(from: model)
                 }
             } else if phase == .background {
+                // A research IMU producer is bounded and stop-first. Backgrounding must not
+                // leave stock firmware streaming until the original deadline.
+                model.ble.stopSensorCaptureForBackground()
                 // Re-submit on every transition because iOS may discard an old best-effort request.
                 HealthWritebackBackgroundScheduler.updateSchedule(
                     isAuthorized: health.auth == .authorized)

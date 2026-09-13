@@ -6,10 +6,18 @@ import XCTest
 /// against hardware by asserting the accelerometer forms a ~1 g gravity shell and the gyro is sane.
 final class Whoop5RawImuTests: XCTestCase {
 
-    /// Build a minimal valid frame: counts = 100, and one known accel + gyro sample at index `i`.
-    private func syntheticFrame(i: Int, axLSB: Int, gxLSB: Int) -> [UInt8] {
+    /// Build a complete CRC-valid frame: counts = 100 and one known accel + gyro sample at index `i`.
+    private func syntheticFrame(i: Int, axLSB: Int, gxLSB: Int,
+                                packetType: UInt8 = 0x2F, version: UInt8 = 21) -> [UInt8] {
         var f = [UInt8](repeating: 0, count: Whoop5RawImu.bufferLength)
-        f[8] = 0x2F
+        f[0] = 0xAA
+        f[1] = 0x01
+        let declaredLength = f.count - 8
+        f[2] = UInt8(declaredLength & 0xFF)
+        f[3] = UInt8((declaredLength >> 8) & 0xFF)
+        f[4] = 0x01
+        f[8] = packetType
+        f[9] = version
         func putU16(_ o: Int, _ v: Int) { f[o] = UInt8(v & 0xFF); f[o + 1] = UInt8((v >> 8) & 0xFF) }
         func putI16(_ o: Int, _ v: Int) { putU16(o, v < 0 ? v + 65536 : v) }
         putU16(24, 100)                         // countA
@@ -17,6 +25,15 @@ final class Whoop5RawImuTests: XCTestCase {
         putU16(15, 0x0000_0064); f[16] = 0; f[17] = 0; f[18] = 0  // baseTs low byte only, = 100
         putI16(28 + 2 * i, axLSB)               // ax[i]
         putI16(640 + 2 * i, gxLSB)              // gx[i]
+        let headerCRC = crc16Modbus(f, 0, 6)
+        f[6] = UInt8(headerCRC & 0xFF)
+        f[7] = UInt8(headerCRC >> 8)
+        let payloadEnd = f.count - 4
+        let payloadCRC = crc32(f, 8, payloadEnd)
+        f[payloadEnd] = UInt8(payloadCRC & 0xFF)
+        f[payloadEnd + 1] = UInt8((payloadCRC >> 8) & 0xFF)
+        f[payloadEnd + 2] = UInt8((payloadCRC >> 16) & 0xFF)
+        f[payloadEnd + 3] = UInt8((payloadCRC >> 24) & 0xFF)
         return f
     }
 
@@ -42,6 +59,111 @@ final class Whoop5RawImuTests: XCTestCase {
         var oversized = syntheticFrame(i: 0, axLSB: 0, gxLSB: 0)
         oversized.append(0)
         XCTAssertNil(Whoop5RawImu.decode(oversized))   // exact-length contract, not a valid prefix
+    }
+
+    func testRejectsCrcInvalidPlausibleFrameFromTrustedDecodeAndColumns() {
+        var f = syntheticFrame(i: 3, axLSB: 4096, gxLSB: 328)
+        f[100] ^= 0x01
+        XCTAssertEqual(f.count, Whoop5RawImu.bufferLength)
+        XCTAssertEqual(Whoop5RawImu.u16(f, 24), 100)
+        XCTAssertEqual(Whoop5RawImu.u16(f, 630), 100)
+        XCTAssertFalse(verifyFrame(f, family: .whoop5).ok)
+        XCTAssertNil(Whoop5RawImu.decode(f))
+        XCTAssertNil(Whoop5RawImu.rawColumns(f))
+    }
+
+    func testRejectsCrcValidUnknownPacketTypeOrLayoutVersion() {
+        let unknownType = syntheticFrame(i: 0, axLSB: 0, gxLSB: 0,
+                                         packetType: 0x7F, version: 21)
+        XCTAssertTrue(verifyFrame(unknownType, family: .whoop5).ok)
+        XCTAssertNil(Whoop5RawImu.decode(unknownType))
+        XCTAssertNil(Whoop5RawImu.rawColumns(unknownType))
+
+        let unknownVersion = syntheticFrame(i: 0, axLSB: 0, gxLSB: 0,
+                                            packetType: 0x2F, version: 0)
+        XCTAssertTrue(verifyFrame(unknownVersion, family: .whoop5).ok)
+        XCTAssertNil(Whoop5RawImu.decode(unknownVersion))
+        XCTAssertNil(Whoop5RawImu.rawColumns(unknownVersion))
+    }
+
+    func testEvidencedLiveType43UsesShapeNotSequenceByteAsVersion() {
+        let frame = syntheticFrame(i: 2, axLSB: 4096, gxLSB: 10,
+                                   packetType: 43, version: 0xA4)
+        XCTAssertTrue(verifyFrame(frame, family: .whoop5).ok)
+        XCTAssertNotNil(Whoop5RawImu.decode(frame))
+        XCTAssertEqual(Whoop5RawImu.rawColumns(frame)?.count, 600)
+    }
+
+    func testHistoricalAndRealtimeCandidateClassificationIsHostStateIndependent() {
+        let banked = syntheticFrame(i: 0, axLSB: 0, gxLSB: 0,
+                                    packetType: 47, version: 21)
+        XCTAssertNotNil(Whoop5RawImu.rawColumns(banked))
+        XCTAssertTrue(Whoop5RawImu.isHistoricalPacket(banked))
+        XCTAssertFalse(Whoop5RawImu.isCandidateRealtimePacket(banked))
+
+        let candidate52 = syntheticFrame(i: 0, axLSB: 0, gxLSB: 0,
+                                         packetType: 52, version: 21)
+        XCTAssertNil(Whoop5RawImu.rawColumns(candidate52), "name-only type 52 must remain Level A")
+        XCTAssertFalse(Whoop5RawImu.isHistoricalPacket(candidate52),
+                       "name-only type 52 cannot be trusted as historical for stop proof")
+        XCTAssertTrue(Whoop5RawImu.isCandidateRealtimePacket(candidate52),
+                      "an exact-size unknown carrier remains conservative stop evidence")
+
+        var live = syntheticFrame(i: 0, axLSB: 0, gxLSB: 0,
+                                  packetType: 43, version: 0x80)
+        XCTAssertNotNil(Whoop5RawImu.rawColumns(live))
+        XCTAssertFalse(Whoop5RawImu.isHistoricalPacket(live))
+        XCTAssertTrue(Whoop5RawImu.isCandidateRealtimePacket(live))
+        live[100] ^= 1
+        XCTAssertNil(Whoop5RawImu.rawColumns(live))
+        XCTAssertTrue(Whoop5RawImu.isCandidateRealtimePacket(live))
+
+        let candidate51 = syntheticFrame(i: 0, axLSB: 0, gxLSB: 0,
+                                         packetType: 51, version: 0x80)
+        XCTAssertNil(Whoop5RawImu.rawColumns(candidate51), "name-only type 51 must remain Level A")
+        XCTAssertTrue(Whoop5RawImu.isCandidateRealtimePacket(candidate51),
+                      "an exact-size unknown live carrier remains conservative stop evidence")
+    }
+
+    func testRepeatedHeaderFragmentsDisprovePostStopSilenceBeforeReassemblyDropsThem() {
+        var complete = syntheticFrame(i: 0, axLSB: 0, gxLSB: 0,
+                                      packetType: 43, version: 0x80)
+        let prefix = Array(complete.prefix(244))
+        XCTAssertTrue(Whoop5RawImu.isCandidateRealtimeHeaderFragment(prefix))
+
+        // Packet type is outside the header-CRC range; a banked type-47 prefix is not live stop evidence.
+        complete[8] = 47
+        XCTAssertFalse(Whoop5RawImu.isCandidateRealtimeHeaderFragment(Array(complete.prefix(244))))
+
+        var corruptHeader = prefix
+        corruptHeader[6] ^= 0x01
+        XCTAssertFalse(Whoop5RawImu.isCandidateRealtimeHeaderFragment(corruptHeader))
+        XCTAssertFalse(Whoop5RawImu.isCandidateRealtimeHeaderFragment(Array(prefix.prefix(8))))
+
+        var controller = SensorAcquisitionController()
+        let ready = SensorAcquisitionController.Preconditions(
+            family: .whoop5, connected: true, commandChannelReady: true,
+            encryptedBond: true, historyReady: true, historyInFlight: false,
+            explicitUserInitiated: false)
+        XCTAssertNotNil(controller.beginOrphanCleanup(preconditions: ready))
+        for attempt in 1...SensorAcquisitionController.maximumStopAttempts {
+            XCTAssertNotNil(controller.currentWrite)
+            XCTAssertNotNil(controller.writeCompleted(succeeded: true))
+            XCTAssertNotNil(controller.currentWrite)
+            XCTAssertNil(controller.writeCompleted(succeeded: true))
+            XCTAssertEqual(controller.phase, .awaitingQuiescence)
+            XCTAssertTrue(Whoop5RawImu.isCandidateRealtimeHeaderFragment(prefix))
+            let retry = controller.producerStillEmittingAfterStop()
+            if attempt < SensorAcquisitionController.maximumStopAttempts {
+                XCTAssertNotNil(retry)
+            } else {
+                XCTAssertNil(retry)
+            }
+        }
+        XCTAssertEqual(controller.phase, .producerUnknown)
+        XCTAssertTrue(controller.cleanupRequired)
+        XCTAssertFalse(controller.confirmProducerQuiescent(),
+                       "repeated durable prefixes must never clear producer debt as silence")
     }
 
     func testDecodesRealBufferAsGravityShell() {

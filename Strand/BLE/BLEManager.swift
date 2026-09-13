@@ -524,6 +524,12 @@ struct ContinuousHrvSchedule {
 /// CoreBluetooth engine for the WHOOP 4.0: scan-by-service → connect → discover →
 /// BOND (one confirmed write) → subscribe → reassemble char-05 frames → FrameRouter.
 /// Cannot run in the simulator; verified manually on-device (Task C6).
+/// Deliberately narrow stock-firmware acquisition surface. New sensor modes require an
+/// independently verified producer/stop contract before they can be added here.
+enum SensorCaptureKind: Sendable {
+    case imu
+}
+
 @MainActor
 public final class BLEManager: NSObject, ObservableObject {
 
@@ -566,6 +572,10 @@ public final class BLEManager: NSObject, ObservableObject {
     ]
 
     static let restoreID = "com.openwhoop.ble.central"
+    private static let sensorProducerCleanupOwedPeripheralsKey =
+        "noop.sensorProducerCleanupOwedPeripherals.v2"
+    private static let sensorProducerRecoveryAttemptsKey =
+        "noop.sensorProducerRecoveryAttempts.v1"
 
     // MARK: Published state
     public let state: LiveState
@@ -893,15 +903,38 @@ public final class BLEManager: NSObject, ObservableObject {
     /// True when this process was relaunched via CoreBluetooth state restoration (`willRestoreState`).
     /// Used by the iOS shell to distinguish a cold force-quit from a bluetooth-central relaunch.
     private(set) var launchedViaStateRestoration = false
-    /// Re-entrancy guard for captureRawAccel: true while a bounded on-demand window is running.
-    /// A second tap is a no-op until the active capture's asyncAfter block fires and clears this.
-    private var rawCaptureInFlight = false
+    /// Typed owner of the verified stock-firmware IMU producer. ATT write acceptance is
+    /// diagnostic only; a run succeeds only after a CRC-valid complete 100 x 6 frame arrives.
+    private var sensorAcquisition = SensorAcquisitionController()
+    private var sensorAcquisitionDeadline: DispatchWorkItem?
+    private var sensorAcquisitionFirstDataTimeout: DispatchWorkItem?
+    private var sensorAcquisitionWriteTimeout: DispatchWorkItem?
+    private var sensorAcquisitionQuiescenceTimeout: DispatchWorkItem?
+    private var sensorAcquisitionWriteAwaitingAck = false
+    private var sensorCommandLaneTaintedUntilReconnect = false
+    private var sensorRecoveryDisconnectRequested = false
+    private var sensorResponseActionsBySequence: [UInt8: SensorAcquisitionController.Action] = [:]
+    /// Prevent an opcode-less CoreBluetooth completion for an unrelated confirmed write
+    /// from being mistaken for a controller action.
+    private var confirmedCommandWritesOutstanding = 0
+    private var sensorAcquisitionRunToken = 0
+    private static let sensorProducerQuietSeconds: TimeInterval = 5
+    private var sensorCleanupPeripheralID: String?
+    private var sensorCaptureSessionID: String?
+    private var sensorCaptureDeviceID: String?
+    private var sensorControlWriteAuthorized = false
+    private var sensorCaptureWindowOpen = false
+    private var sensorCaptureCloseTask: Task<Void, Never>?
+    private var sensorWireEvidenceFailedOnCurrentLink = false
+    /// True while the verified bounded IMU capture is active. The continuous recorder
+    /// stands down from overlapping this producer.
+    private var rawCaptureInFlight: Bool { sensorAcquisition.isActive }
     private var rawCaptureStoppedAt = Date.distantPast
     private var unexpectedImuStopAt = Date.distantPast
     /// Developer Options "Record 100 Hz IMU locally" producer owner. Owns its switch state, the
     /// hardware start/stop lifecycle, and the continuous local store — deliberately separate from
-    /// `rawCaptureInFlight` (bounded sessions) and `noopRawCaptureEnabled` (frame retention), so
-    /// neither can silently keep this producer running after the user turns it off.
+    /// bounded `startSensorCapture` and `noopRawCaptureEnabled` (frame retention), so neither can
+    /// silently keep this producer running after the user turns it off.
     let imuRecorder = ImuContinuousRecorder()
     /// Admits the raw-data command family to the 5/MG send() allowlist for the duration of the
     /// recorder's OWN start/stop sends (and the unexpected-producer fail-safe's). Held only around
@@ -1054,7 +1087,13 @@ public final class BLEManager: NSObject, ObservableObject {
     /// can re-subscribe them AFTER bonding — the strap refuses them ("Authentication is insufficient")
     /// until the link is encrypted (issue #17).
     private var whoop5NotifyCharacteristics: [CBCharacteristic] = []
-    private var reassembler = Reassembler()
+    /// Reassembly is characteristic-scoped. Interleaved fd4b0003/4/5/7 fragments must
+    /// never share one byte window.
+    private var reassembler = CharacteristicReassembler()
+    /// Exact CoreBluetooth notification bytes, persisted before routing/reassembly/decode.
+    private var wireEvidenceJournal: WireEvidenceJournal?
+    private var wireEvidenceConnection: WireEvidenceJournal.Connection?
+    private var wireEvidenceDisabled = false
     private var seq: UInt8 = 0
     private var didBond = false
     /// #1635: one explicit Connect grants one fresh CLIENT_HELLO even when the suppression latch is set.
@@ -1587,7 +1626,10 @@ public final class BLEManager: NSObject, ObservableObject {
                 return self.state.connected && self.didBond && self.selectedModel.deviceFamily == .whoop5
             },
             activeDeviceId: { [weak self] in self?.deviceId ?? "" },
-            otherProducerActive: { [weak self] in self?.rawCaptureInFlight ?? false },
+            otherProducerActive: { [weak self] in
+                guard let self else { return false }
+                return self.rawCaptureInFlight || self.sensorAcquisition.cleanupRequired
+            },
             freeDiskBytes: { BLEManager.freeDiskBytes() },
             log: { [weak self] line in self?.log(line) }
         )
@@ -1684,7 +1726,7 @@ public final class BLEManager: NSObject, ObservableObject {
             ? BatteryEstimator.ratedLifeHoursWhoop5 : BatteryEstimator.ratedLifeHoursWhoop4
         // Frame the inbound stream for the chosen family (WHOOP 4.0 CRC8 vs WHOOP 5.0 CRC16/puffin)
         // and tell the router which decoder to use. Fresh per connection so no stale bytes carry over.
-        reassembler = Reassembler(family: model.deviceFamily)
+        reassembler = CharacteristicReassembler(family: model.deviceFamily)
         router.family = model.deviceFamily
         router.deviceId = deviceId   // #1706: attribute this connection's alarm readback
         // Live 5/MG persistence: point the Collector's decode at the selected family and install the
@@ -2166,79 +2208,155 @@ public final class BLEManager: NSObject, ObservableObject {
         await collector?.storageStats()
     }
 
-    /// Capture raw accelerometer (type-43 IMU) frames on demand for a bounded window, then stop.
-    /// Persists raw even when the global research toggle is off (that's the point: on-demand, not
-    /// 24/7). The Collector's window auto-expires at its deadline so a dropped stop can't leak raw.
-    public func captureRawAccel(seconds: TimeInterval = 30) {
-        guard !rawCaptureInFlight else {
-            log("Raw-accel capture: already in flight — ignoring")
-            return
-        }
-        rawCaptureInFlight = true
-        let secs = RawCaptureWindow.clamp(seconds)
-        collector?.beginRawCapture(seconds: secs)
-        // Hardware-verified on WHOOP 5/MG: opcode 106 alone acknowledges but does not start the
-        // producer. START_RAW_DATA must precede the two-byte realtime IMU selector.
-        send(.startRawData, payload: [0x01], writeType: .withResponse)
-        if selectedModel.deviceFamily == .whoop5 {
-            send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
-        } else {
-            send(.toggleIMUMode, payload: [0x01], writeType: .withResponse)
-        }
-        log("Raw-accel capture: started for \(secs)s")
-        DispatchQueue.main.asyncAfter(deadline: .now() + secs) { [weak self] in
-            guard let self else { return }
-            // Only stop the raw stream if the 24/7 research toggle is OFF.  When it's ON, the
-            // continuous stream must keep running — we just flush/upload the bounded window we
-            // captured without halting the wider session.
-            if !UserDefaults.standard.noopRawCaptureEnabled {
-                self.send(.stopRawData, payload: [0x01], writeType: .withResponse)
-                if self.selectedModel.deviceFamily == .whoop5 {
-                    self.send(.toggleIMUMode, payload: [0x01, 0x00], writeType: .withResponse)
-                }
-            }
-            self.rawCaptureInFlight = false
-            Task { @MainActor in
-                await self.collector?.endRawCapture()
-            }
-            self.log("Raw-accel capture: stopped + flushed")
+    /// The sole application-facing stock-sensor control entry point. It accepts only the
+    /// hardware-verified WHOOP 5/MG IMU producer contract. A durable session must already
+    /// exist; this method never accepts an opcode or caller-provided payload.
+    @discardableResult
+    func startSensorCapture(_ kind: SensorCaptureKind, duration: TimeInterval) -> Bool {
+        switch kind {
+        case .imu:
+            return beginStockImuAcquisition(duration: RawCaptureWindow.clamp(duration))
         }
     }
 
-    /// Start a manually stopped 5/MG raw-data session. Returns false when another capture is active.
+    /// Stop the active producer and wait for the serialized 82 -> 106-off sequence plus
+    /// a conservative five-second no-producer observation. A zero-data run returns false
+    /// even when every ATT write was accepted.
     @discardableResult
-    public func startGroundTruthRawCapture(sessionId: String) -> Bool {
-        guard !rawCaptureInFlight else { return false }
-        rawCaptureInFlight = true
-        send(.startRawData, payload: [0x01], writeType: .withResponse)
-        send(.toggleIMUMode,
-             payload: selectedModel.deviceFamily == .whoop5 ? [0x01, 0x01] : [0x01],
-             writeType: .withResponse)
-        log("Raw-data session: started")
+    func stopSensorCapture() async -> Bool {
+        if sensorAcquisition.isActive || sensorAcquisition.cleanupRequired {
+            guard let owner = sensorCleanupPeripheralID,
+                  peripheral?.identifier.uuidString == owner else {
+                log("Sensor capture: stop refused because this peripheral does not own cleanup debt")
+                return false
+            }
+        }
+        if let action = sensorAcquisition.requestStop(reason: .user) {
+            performSensorAcquisitionAction(action)
+        } else if sensorAcquisition.cleanupRequired {
+            guard reserveSensorWireEvidenceCapacity(),
+                  let action = sensorAcquisition.beginRecovery(
+                    preconditions: sensorAcquisitionPreconditions(explicitUserInitiated: false)) else {
+                log("Sensor capture: cleanup remains pending; recovery preconditions are not met")
+                return false
+            }
+            performSensorAcquisitionAction(action)
+        }
+        sensorAcquisitionDeadline?.cancel()
+        sensorAcquisitionDeadline = nil
+        sensorAcquisitionFirstDataTimeout?.cancel()
+        sensorAcquisitionFirstDataTimeout = nil
+
+        let waitUntil = Date().addingTimeInterval(12)
+        while sensorAcquisition.isActive && Date() < waitUntil {
+            guard !Task.isCancelled else { return false }
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            } catch {
+                return false
+            }
+        }
+        finishSensorAcquisitionIfTerminal()
+        if let closeTask = sensorCaptureCloseTask { await closeTask.value }
+        let ownerStillOwed = sensorCleanupPeripheralID.map {
+            persistedSensorCleanupDebts()[$0] != nil
+        } ?? false
+        let succeeded = sensorAcquisition.phase == .stopped
+            && !sensorAcquisition.cleanupRequired
+            && !ownerStillOwed
+        log("Sensor capture: stop completed=\(succeeded), validatedFrames=\(sensorAcquisition.validatedFrameCount)")
+        return succeeded
+    }
+
+    /// Lifecycle cleanup is deliberately stop-only. It never re-arms a persisted session.
+    func stopSensorCaptureForBackground() {
+        guard sensorAcquisition.isActive else { return }
+        if let action = sensorAcquisition.requestStop(reason: .background) {
+            performSensorAcquisitionAction(action)
+        }
+        log("Sensor capture: background stop requested")
+    }
+
+    private func beginStockImuAcquisition(duration: TimeInterval) -> Bool {
+        guard collector != nil,
+              let peripheralID = peripheral?.identifier.uuidString,
+              let session = RawDataSessionStore.shared.active,
+              session.peripheralId == peripheralID else {
+            log("Sensor capture: start rejected; durable session and connected peripheral do not match")
+            return false
+        }
+        guard sensorCleanupPeripheralID == nil, sensorCaptureCloseTask == nil else {
+            log("Sensor capture: start rejected until prior cleanup is durably published")
+            return false
+        }
+        guard reserveSensorWireEvidenceCapacity() else {
+            log("Sensor capture: start rejected because Level-A capacity is unavailable")
+            return false
+        }
+        let decision = sensorAcquisition.begin(
+            profile: .imuBurst,
+            durationSeconds: duration,
+            preconditions: sensorAcquisitionPreconditions(explicitUserInitiated: true)
+        )
+        guard decision.accepted, let first = decision.action else {
+            log("Sensor capture: start rejected reason=\(String(describing: decision.rejection))")
+            closeWireEvidenceConnection()
+            return false
+        }
+
+        sensorAcquisitionRunToken &+= 1
+        sensorWireEvidenceFailedOnCurrentLink = false
+        sensorResponseActionsBySequence.removeAll(keepingCapacity: true)
+        clearPersistedSensorRecoveryAttempts(for: peripheralID)
+        sensorCleanupPeripheralID = peripheralID
+        sensorCaptureSessionID = session.id
+        sensorCaptureDeviceID = session.deviceId
+        sensorCaptureWindowOpen = true
+        // Persist cleanup ownership before opcode 81. UserDefaults is best effort across
+        // sudden power loss; retaining an uncertain debt is the conservative outcome.
+        markSensorCleanupOwed(for: peripheralID, family: selectedModel.deviceFamily)
+        collector?.beginRawCapture(seconds: duration)
+
+        let token = sensorAcquisitionRunToken
+        sensorAcquisitionDeadline?.cancel()
+        let deadline = DispatchWorkItem { [weak self] in
+            guard let self, self.sensorAcquisitionRunToken == token else { return }
+            if let action = self.sensorAcquisition.deadlineReached() {
+                self.performSensorAcquisitionAction(action)
+            }
+            self.log("Sensor capture: bounded deadline reached; stop requested")
+        }
+        sensorAcquisitionDeadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: deadline)
+        performSensorAcquisitionAction(first)
+        log("Sensor capture: arming IMU for \(Int(duration))s; awaiting validated data")
         return true
     }
 
-    /// Stop and flush the current manually controlled raw-data session.
-    public func stopGroundTruthRawCapture() async {
-        if rawCaptureInFlight && !UserDefaults.standard.noopRawCaptureEnabled {
-            send(.stopRawData, payload: [0x01], writeType: .withResponse)
-            if selectedModel.deviceFamily == .whoop5 {
-                send(.toggleIMUMode, payload: [0x01, 0x00], writeType: .withResponse)
-            }
-        }
-        rawCaptureInFlight = false
-        rawCaptureStoppedAt = Date()
-        log("Raw-data session: stopped + flushed")
+    private func sensorAcquisitionPreconditions(
+        explicitUserInitiated: Bool
+    ) -> SensorAcquisitionController.Preconditions {
+        SensorAcquisitionController.Preconditions(
+            family: selectedModel.deviceFamily,
+            connected: state.connected,
+            commandChannelReady: commandChannelReady,
+            encryptedBond: state.encryptedBond,
+            historyReady: state.historyReady,
+            historyInFlight: backfilling || backfillDraining || !backfillFrameQueue.isEmpty,
+            controlPlaneIdle: !sensorCommandLaneTaintedUntilReconnect
+                && confirmedCommandWritesOutstanding == 0,
+            explicitUserInitiated: explicitUserInitiated
+        )
     }
 
     /// Stop a realtime IMU producer left armed after a crash, lost stop write, or another client.
-    /// Stands down while the continuous recorder expects packets (`imuRecorder.expectsImuPackets`) —
-    /// otherwise turning raw-frame retention off would make this fail-safe kill the recorder's
-    /// explicitly requested stream.
+    /// Stands down while the continuous recorder expects packets (`imuRecorder.expectsImuPackets`)
+    /// or while verified bounded capture / stop-first cleanup owns the producer.
     private func stopUnexpectedRealtimeImu(_ frame: [UInt8], isOffload: Bool, now: Date = Date()) {
         guard selectedModel.deviceFamily == .whoop5, !isOffload, frame.count > 8,
               frame[8] == 43 || frame[8] == 51,
-              !rawCaptureInFlight, !imuRecorder.expectsImuPackets,
+              !rawCaptureInFlight, !sensorAcquisition.cleanupRequired,
+              !imuRecorder.expectsImuPackets,
               !UserDefaults.standard.noopRawCaptureEnabled,
               now.timeIntervalSince(rawCaptureStoppedAt) >= 3,
               now.timeIntervalSince(unexpectedImuStopAt) >= 30 else { return }
@@ -2248,6 +2366,441 @@ public final class BLEManager: NSObject, ObservableObject {
         send(.toggleIMUMode, payload: [0x01, 0x00], writeType: .withResponse)
         rawDataCommandGate = false
         log("Raw IMU fail-safe: unexpected realtime packet type \(frame[8]) while capture was off; stop requested")
+    }
+
+    private func performSensorAcquisitionAction(_ action: SensorAcquisitionController.Action) {
+        guard sensorAcquisition.currentWrite == action,
+              let command = WhoopCommand(rawValue: action.opcode),
+              Self.isVerifiedSensorAction(action) else {
+            log("Sensor capture: refused an action outside the verified controller contract")
+            return
+        }
+        guard Self.peripheralOwnsCleanupDebt(
+            peripheral?.identifier,
+            cleanupOwner: sensorCleanupPeripheralID
+        ) else {
+            sensorAcquisition.disconnected()
+            log("Sensor capture: physical cleanup owner changed; write refused")
+            return
+        }
+
+        sensorAcquisitionWriteTimeout?.cancel()
+        sensorAcquisitionWriteAwaitingAck = true
+        sensorControlWriteAuthorized = true
+        send(command, payload: action.payload, writeType: .withResponse)
+        sensorControlWriteAuthorized = false
+        sensorResponseActionsBySequence[seq] = action
+
+        let expected = action
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.sensorAcquisitionWriteAwaitingAck,
+                  self.sensorAcquisition.currentWrite == expected else { return }
+            self.sensorAcquisitionWriteAwaitingAck = false
+            self.sensorCommandLaneTaintedUntilReconnect = true
+            self.sensorAcquisition.disconnected()
+            self.log("Sensor capture: ATT timeout for opcode \(expected.opcode); reconnecting stop-first")
+            if let peripheral = self.peripheral {
+                self.sensorRecoveryDisconnectRequested = true
+                self.central.cancelPeripheralConnection(peripheral)
+            }
+        }
+        sensorAcquisitionWriteTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
+    }
+
+    nonisolated static func isVerifiedSensorAction(
+        _ action: SensorAcquisitionController.Action
+    ) -> Bool {
+        switch action.kind {
+        case .startRawData:
+            return action.opcode == 81 && action.payload == [0x01]
+        case .toggleImuOn:
+            return action.opcode == 106 && action.payload == [0x01, 0x01]
+        case .stopRawData:
+            return action.opcode == 82 && action.payload == [0x01]
+        case .toggleImuOff:
+            return action.opcode == 106 && action.payload == [0x01, 0x00]
+        }
+    }
+
+    private func advanceSensorAcquisitionWrite(succeeded: Bool) {
+        sensorAcquisitionWriteTimeout?.cancel()
+        sensorAcquisitionWriteTimeout = nil
+        if let next = sensorAcquisition.writeCompleted(succeeded: succeeded) {
+            performSensorAcquisitionAction(next)
+            return
+        }
+        if sensorAcquisition.phase == .awaitingValidatedData {
+            armSensorAcquisitionFirstDataTimeout()
+        } else if sensorAcquisition.phase == .awaitingQuiescence {
+            armSensorAcquisitionQuiescenceTimeout()
+        }
+        finishSensorAcquisitionIfTerminal()
+        forceReconnectForUnresolvedSensorProducer()
+    }
+
+    private func armSensorAcquisitionFirstDataTimeout() {
+        sensorAcquisitionFirstDataTimeout?.cancel()
+        let token = sensorAcquisitionRunToken
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.sensorAcquisitionRunToken == token,
+                  self.sensorAcquisition.phase == .awaitingValidatedData else { return }
+            if let action = self.sensorAcquisition.deadlineReached() {
+                self.performSensorAcquisitionAction(action)
+            }
+            self.log("Sensor capture: no validated IMU data within 10s; stop requested")
+        }
+        sensorAcquisitionFirstDataTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeout)
+    }
+
+    private func armSensorAcquisitionQuiescenceTimeout() {
+        sensorAcquisitionQuiescenceTimeout?.cancel()
+        let token = sensorAcquisitionRunToken
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.sensorAcquisitionRunToken == token,
+                  self.sensorAcquisition.phase == .awaitingQuiescence else { return }
+            guard Self.peripheralOwnsCleanupDebt(
+                self.peripheral?.identifier,
+                cleanupOwner: self.sensorCleanupPeripheralID
+            ), !self.sensorWireEvidenceFailedOnCurrentLink else {
+                self.sensorAcquisition.disconnected()
+                self.forceReconnectForUnresolvedSensorProducer()
+                return
+            }
+            if self.sensorAcquisition.confirmProducerQuiescent() {
+                self.log("Sensor capture: no realtime IMU candidate for five seconds after stop")
+                self.finishSensorAcquisitionIfTerminal()
+            }
+        }
+        sensorAcquisitionQuiescenceTimeout = timeout
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.sensorProducerQuietSeconds,
+            execute: timeout
+        )
+    }
+
+    private func noteValidatedRealtimeImu(_ frame: [UInt8]) {
+        guard let deviceID = sensorCaptureDeviceID,
+              Self.peripheralOwnsCleanupDebt(
+                peripheral?.identifier,
+                cleanupOwner: sensorCleanupPeripheralID
+              ) else { return }
+        let wasStopping = sensorAcquisition.phase == .awaitingQuiescence
+        guard collector?.recordValidatedWhoop5Imu(frame, deviceId: deviceID) ?? 0 > 0 else {
+            if wasStopping { noteRealtimeImuCandidateAfterStop(validated: true) }
+            return
+        }
+        if sensorAcquisition.noteValidatedImuFrame() {
+            sensorAcquisitionFirstDataTimeout?.cancel()
+            sensorAcquisitionFirstDataTimeout = nil
+            log("Sensor capture: producer proved by first CRC-valid complete 100 x 6 frame")
+        }
+        if wasStopping { noteRealtimeImuCandidateAfterStop(validated: true) }
+    }
+
+    private func noteRealtimeImuCandidateAfterStop(validated: Bool) {
+        guard sensorAcquisition.phase == .awaitingQuiescence else { return }
+        sensorAcquisitionQuiescenceTimeout?.cancel()
+        sensorAcquisitionQuiescenceTimeout = nil
+        if let retry = sensorAcquisition.producerStillEmittingAfterStop() {
+            log("Sensor capture: \(validated ? "validated" : "untrusted") producer candidate after stop; retrying")
+            performSensorAcquisitionAction(retry)
+        } else {
+            forceReconnectForUnresolvedSensorProducer()
+        }
+    }
+
+    private func noteSensorAcquisitionFirmwareResponse(_ frame: [UInt8]) {
+        guard selectedModel.deviceFamily == .whoop5,
+              sensorAcquisition.isActive || sensorAcquisition.cleanupRequired,
+              verifyFrame(frame, family: .whoop5).ok,
+              frame.count > 12, frame[8] == 36,
+              frame[10] == 81 || frame[10] == 82 || frame[10] == 106 else { return }
+        let originSequence = frame[11]
+        guard let action = sensorResponseActionsBySequence[originSequence],
+              action.opcode == frame[10] else { return }
+        let result = frame[12]
+        if result != 2 { sensorResponseActionsBySequence.removeValue(forKey: originSequence) }
+        log("Sensor capture: firmware response opcode=\(frame[10]) result=\(result); response is not producer proof")
+        if let cleanup = sensorAcquisition.noteFirmwareResponse(action: action, resultCode: result) {
+            performSensorAcquisitionAction(cleanup)
+        }
+        forceReconnectForUnresolvedSensorProducer()
+    }
+
+    private func finishSensorAcquisitionIfTerminal() {
+        guard sensorAcquisition.phase == .stopped || sensorAcquisition.phase == .failed else { return }
+        sensorAcquisitionDeadline?.cancel()
+        sensorAcquisitionDeadline = nil
+        sensorAcquisitionFirstDataTimeout?.cancel()
+        sensorAcquisitionFirstDataTimeout = nil
+        sensorAcquisitionQuiescenceTimeout?.cancel()
+        sensorAcquisitionQuiescenceTimeout = nil
+        let closeCollector = sensorCaptureWindowOpen
+        sensorCaptureWindowOpen = false
+        rawCaptureStoppedAt = Date()
+        guard sensorCaptureCloseTask == nil,
+              !sensorAcquisition.cleanupRequired,
+              let owner = sensorCleanupPeripheralID else { return }
+        let sessionID = sensorCaptureSessionID
+        let token = sensorAcquisitionRunToken
+        sensorCaptureCloseTask = Task { @MainActor in
+            if closeCollector { await self.collector?.endRawCapture() }
+            guard token == self.sensorAcquisitionRunToken,
+                  self.sensorCleanupPeripheralID == owner,
+                  !self.sensorAcquisition.cleanupRequired else {
+                self.sensorCaptureCloseTask = nil
+                return
+            }
+            let published = RawDataSessionStore.shared.reconcileProducerStopped(
+                sessionId: sessionID,
+                peripheralId: owner
+            )
+            guard published else {
+                self.sensorCaptureCloseTask = nil
+                self.log("Sensor capture: producer stopped but final storage publication failed; debt retained")
+                return
+            }
+            self.clearSensorCleanupOwed(for: owner)
+            self.clearPersistedSensorRecoveryAttempts(for: owner)
+            self.sensorCleanupPeripheralID = nil
+            self.sensorCaptureSessionID = nil
+            self.sensorCaptureDeviceID = nil
+            self.sensorResponseActionsBySequence.removeAll(keepingCapacity: true)
+            self.sensorCaptureCloseTask = nil
+            self.closeWireEvidenceConnection()
+            self.log("Sensor capture: cleanup and durable session close published")
+            self.resumeNormalControlAfterSensorCapture()
+        }
+    }
+
+    private func resumeNormalControlAfterSensorCapture() {
+        guard state.connected, state.encryptedBond,
+              selectedModel.deviceFamily == .whoop5 else { return }
+        send(.setClock, payload: BLEManager.setClockPayload())
+        send(.getClock, payload: [])
+        let wantRealtime = screenWantsRealtime || continuousCaptureWantsNow()
+        wantsRealtime = wantRealtime
+        send(.toggleRealtimeHR, payload: [wantRealtime ? 0x01 : 0x00])
+        realtimeArmed = wantRealtime
+        whoop5RealtimeArmed = wantRealtime
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.requestSync(.connect)
+        }
+        startBackfillTimer()
+        if didBond, !imuRecorderArmedLink {
+            imuRecorderArmedLink = true
+            imuRecorder.handleBonded5MG()
+        }
+    }
+
+    private func forceReconnectForUnresolvedSensorProducer() {
+        guard sensorAcquisition.phase == .producerUnknown,
+              !sensorRecoveryDisconnectRequested,
+              let peripheral, peripheral.state == .connected else { return }
+        sensorRecoveryDisconnectRequested = true
+        log("Sensor capture: producer state unresolved; reconnecting for stop-first recovery")
+        central.cancelPeripheralConnection(peripheral)
+    }
+
+    private func recoverUnknownSensorProducerIfNeeded() {
+        guard let id = peripheral?.identifier.uuidString,
+              sensorCleanupPeripheralID == id,
+              persistedSensorCleanupDebts()[id] == DeviceFamily.whoop5.rawValue,
+              persistedSensorRecoveryAttempts(for: id)
+                < SensorAcquisitionController.maximumStopAttempts,
+              reserveSensorWireEvidenceCapacity(),
+              let action = sensorAcquisition.beginRecovery(
+                preconditions: sensorAcquisitionPreconditions(explicitUserInitiated: false)
+              ) else { return }
+        let attempt = claimPersistedSensorRecoveryAttempt(for: id)
+        log("Sensor capture: authenticated reconnect stop-first attempt \(attempt)")
+        performSensorAcquisitionAction(action)
+    }
+
+    private func restoreSensorCleanupDebtIfOwed(
+        for peripheral: CBPeripheral,
+        family: DeviceFamily
+    ) {
+        let id = peripheral.identifier.uuidString
+        guard persistedSensorCleanupDebts()[id] == family.rawValue,
+              sensorCleanupPeripheralID == nil || sensorCleanupPeripheralID == id else { return }
+        sensorCleanupPeripheralID = id
+        if let active = RawDataSessionStore.shared.active, active.peripheralId == id {
+            sensorCaptureSessionID = active.id
+            sensorCaptureDeviceID = active.deviceId
+        }
+        if !sensorAcquisition.cleanupRequired { sensorAcquisition.restoreCleanupDebt() }
+        log("Sensor capture: restored stop-first cleanup debt")
+    }
+
+    private func persistedSensorCleanupDebts() -> [String: String] {
+        UserDefaults.standard.dictionary(
+            forKey: Self.sensorProducerCleanupOwedPeripheralsKey
+        ) as? [String: String] ?? [:]
+    }
+
+    private func markSensorCleanupOwed(for peripheralID: String, family: DeviceFamily) {
+        var value = persistedSensorCleanupDebts()
+        value[peripheralID] = family.rawValue
+        UserDefaults.standard.set(value, forKey: Self.sensorProducerCleanupOwedPeripheralsKey)
+    }
+
+    private func clearSensorCleanupOwed(for peripheralID: String) {
+        var value = persistedSensorCleanupDebts()
+        value.removeValue(forKey: peripheralID)
+        if value.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.sensorProducerCleanupOwedPeripheralsKey)
+        } else {
+            UserDefaults.standard.set(value, forKey: Self.sensorProducerCleanupOwedPeripheralsKey)
+        }
+    }
+
+    private func persistedSensorRecoveryAttempts() -> [String: Int] {
+        let raw = UserDefaults.standard.dictionary(
+            forKey: Self.sensorProducerRecoveryAttemptsKey
+        ) ?? [:]
+        return raw.reduce(into: [:]) { result, entry in
+            if let count = entry.value as? NSNumber {
+                result[entry.key] = max(0, count.intValue)
+            }
+        }
+    }
+
+    private func persistedSensorRecoveryAttempts(for peripheralID: String) -> Int {
+        persistedSensorRecoveryAttempts()[peripheralID] ?? 0
+    }
+
+    @discardableResult
+    private func claimPersistedSensorRecoveryAttempt(for peripheralID: String) -> Int {
+        var value = persistedSensorRecoveryAttempts()
+        let next = min(
+            SensorAcquisitionController.maximumStopAttempts,
+            (value[peripheralID] ?? 0) + 1
+        )
+        value[peripheralID] = next
+        UserDefaults.standard.set(value, forKey: Self.sensorProducerRecoveryAttemptsKey)
+        return next
+    }
+
+    private func clearPersistedSensorRecoveryAttempts(for peripheralID: String) {
+        var value = persistedSensorRecoveryAttempts()
+        value.removeValue(forKey: peripheralID)
+        if value.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.sensorProducerRecoveryAttemptsKey)
+        } else {
+            UserDefaults.standard.set(value, forKey: Self.sensorProducerRecoveryAttemptsKey)
+        }
+    }
+
+    nonisolated static func peripheralOwnsCleanupDebt(
+        _ current: UUID?,
+        cleanupOwner: String?
+    ) -> Bool {
+        guard let current, let cleanupOwner else { return false }
+        return current.uuidString == cleanupOwner
+    }
+
+    private func ensureWireEvidenceReady() -> Bool {
+        guard !wireEvidenceDisabled else { return false }
+        do {
+            let journal: WireEvidenceJournal
+            if let existing = wireEvidenceJournal {
+                journal = existing
+            } else {
+                let created = try WireEvidenceJournal()
+                wireEvidenceJournal = created
+                journal = created
+            }
+            if wireEvidenceConnection == nil {
+                guard let peripheralID = peripheral?.identifier.uuidString else { return false }
+                wireEvidenceConnection = try journal.beginConnection(
+                    peripheralID: peripheralID,
+                    deviceID: deviceId,
+                    firmware: state.strapFirmware ?? disFirmware,
+                    family: selectedModel.deviceFamily.rawValue
+                )
+            }
+            return true
+        } catch {
+            wireEvidenceDisabled = true
+            log("Wire evidence unavailable: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func reserveSensorWireEvidenceCapacity() -> Bool {
+        guard ensureWireEvidenceReady(),
+              let journal = wireEvidenceJournal,
+              let connection = wireEvidenceConnection,
+              let characteristic = Self.whoop5NotifyChars.first else { return false }
+        do {
+            try journal.reserveCapacityForNotification(
+                payloadByteCount: Whoop5RawImu.bufferLength,
+                connection: connection,
+                serviceUUID: Self.whoop5Service.uuidString,
+                characteristicUUID: characteristic.uuidString
+            )
+            return true
+        } catch {
+            log("Wire evidence capacity unavailable: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Called at the notification seam before any characteristic routing or semantic decode.
+    private func captureSensorWireEvidence(
+        _ bytes: [UInt8],
+        characteristic: CBCharacteristic
+    ) -> Bool {
+        guard sensorAcquisition.requiresWireEvidence else { return true }
+        guard ensureWireEvidenceReady(),
+              let journal = wireEvidenceJournal,
+              let connection = wireEvidenceConnection else {
+            handleRequiredWireEvidenceFailure()
+            return false
+        }
+        do {
+            _ = try journal.appendNotification(
+                payload: Data(bytes),
+                connection: connection,
+                serviceUUID: characteristic.service?.uuid.uuidString ?? "unknown",
+                characteristicUUID: characteristic.uuid.uuidString
+            )
+            return true
+        } catch {
+            wireEvidenceDisabled = true
+            log("Wire evidence append failed: \(error.localizedDescription)")
+            handleRequiredWireEvidenceFailure()
+            return false
+        }
+    }
+
+    private func handleRequiredWireEvidenceFailure() {
+        guard sensorAcquisition.requiresWireEvidence else { return }
+        sensorWireEvidenceFailedOnCurrentLink = true
+        if let stop = sensorAcquisition.evidencePersistenceFailed() {
+            performSensorAcquisitionAction(stop)
+        }
+        forceReconnectForUnresolvedSensorProducer()
+    }
+
+    private func closeWireEvidenceConnection() {
+        if let connection = wireEvidenceConnection {
+            wireEvidenceJournal?.endConnection(connection)
+        }
+        wireEvidenceConnection = nil
+        do {
+            _ = try wireEvidenceJournal?.close()
+        } catch {
+            log("Wire evidence close failed: \(error.localizedDescription)")
+        }
+        wireEvidenceJournal = nil
+        wireEvidenceDisabled = false
     }
 
     /// FRWHOOP issue #1: route one live-path 5/MG frame into the Raw Data Collector's canonical
@@ -2287,6 +2840,17 @@ public final class BLEManager: NSObject, ObservableObject {
         guard state.connected, let p = peripheral, p.state == .connected, let ch = cmdCharacteristic else {
             let reason = state.connected ? "command characteristic unavailable" : "not connected"
             log("send(\(command.label)) ignored — \(reason)")
+            return
+        }
+        let isSensorOpcode = command == .startRawData
+            || command == .stopRawData || command == .toggleIMUMode
+        if isSensorOpcode && !sensorControlWriteAuthorized {
+            log("send(\(command.label)) blocked — stock-sensor opcodes are controller-owned")
+            return
+        }
+        if (sensorAcquisition.isActive || sensorAcquisition.cleanupRequired)
+            && !sensorControlWriteAuthorized {
+            log("send(\(command.label)) deferred — verified sensor control owns the command lane")
             return
         }
         // The MG ECG family is 5/MG-only by construction, and the WHOOP 4.0 branch further down has no
@@ -2354,12 +2918,10 @@ public final class BLEManager: NSObject, ObservableObject {
                 || (DeviceConfigReadProbe.isReadOnlyOpcode(command.rawValue) && deviceConfigReport != nil)
                 || command == .sendHistoricalData || command == .historicalDataResult
                 || command == .setClock || command == .getClock
-                // Bounded Raw Data Collector + the Developer Options continuous IMU recorder (and
-                // the unexpected-producer fail-safe, which holds rawDataCommandGate around its own
-                // sends). These writes remain impossible unless the explicit user-started capture
-                // window is in flight or the recorder/fail-safe is mid-send; normal sync never
-                // enables either gate.
-                || ((rawCaptureInFlight || rawDataCommandGate) && (command == .startRawData
+                // Bounded Raw Data Collector (sensorControlWriteAuthorized around its own writes)
+                // plus the Developer Options continuous IMU recorder and unexpected-producer
+                // fail-safe (rawDataCommandGate). Normal sync never enables either gate.
+                || ((sensorControlWriteAuthorized || rawDataCommandGate) && (command == .startRawData
                     || command == .stopRawData || command == .toggleIMUMode))
                 // SET_CONFIG / SET_FF_VALUE (120), ENABLE direction — the R22 deep-stream unlock. Allowed
                 // only while the deep-data experiment is opted in, and only for a KEY and a VALUE the gate
@@ -2431,6 +2993,9 @@ public final class BLEManager: NSObject, ObservableObject {
                 ? MaverickHaptics.notificationBuzz(loops: buzzLoops) : payload
             seq = seq &+ 1
             let frame = puffinCommandFrame(cmd: puffinCmd, seq: seq, payload: puffinPayload)
+            if writeType == .withResponse && !sensorControlWriteAuthorized {
+                confirmedCommandWritesOutstanding += 1
+            }
             p.writeValue(Data(frame), for: ch, type: writeType)
             let cmdNote = isHaptics ? " cmd=0x13" : ""
             if command == .historicalDataResult {
@@ -2445,6 +3010,9 @@ public final class BLEManager: NSObject, ObservableObject {
         }
         seq = seq &+ 1
         let frame = command.frame(seq: seq, payload: payload)
+        if writeType == .withResponse && !sensorControlWriteAuthorized {
+            confirmedCommandWritesOutstanding += 1
+        }
         p.writeValue(Data(frame), for: ch, type: writeType)
         log("→ \(command.label) payload=\(hex(payload))")
     }
@@ -2517,6 +3085,10 @@ public final class BLEManager: NSObject, ObservableObject {
     /// flag, kick the strap with sendHistoricalData, and arm the idle timeout.
     @discardableResult
     private func beginBackfill() -> Bool {
+        guard sensorAcquisition.permitsHistoryStart else {
+            log("Backfill: deferred while verified sensor capture or cleanup owns the command lane")
+            return false
+        }
         // #1598: this whole block is WHOOP 4.0 ONLY. A 5/MG has no GET_CLOCK correlation to chase —
         // identity is its correct decode — and deriving one from the Data Range would misdate its
         // history. See BackfillContinuation.derivesClockCorrelation for why.
@@ -4788,7 +5360,7 @@ public final class BLEManager: NSObject, ObservableObject {
         advertisementLogged = false
         cancelScanFallback()
         selectedModel = model
-        reassembler = Reassembler(family: model.deviceFamily)
+        reassembler = CharacteristicReassembler(family: model.deviceFamily)
         router.family = model.deviceFamily
         router.deviceId = deviceId   // #1706: attribute this connection's alarm readback
         configureCollectorFamily()
@@ -5912,14 +6484,24 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         didBond = false
         clientHelloWriteAt = nil   // #1635: no hello survives the link that carried it
         whoop5RealtimeArmed = false
-        // A user capture remains represented by RawDataSessionStore, but its transport must be re-armed
-        // on the next connection. Keeping this true would make that reconnect attempt a silent no-op.
-        rawCaptureInFlight = false
         imuRecorderArmedLink = false
         // The continuous IMU recorder keeps its window open across the drop (the gap is reported,
         // not hidden) and re-arms from the post-bond hook on the next link. An unfinished stop
         // becomes owed again — the write may not have landed.
         imuRecorder.handleDisconnect()
+        // Link loss makes producer state unknowable. Persisted ownership survives and the next
+        // authenticated connection is stop-first; an interrupted capture is never re-armed.
+        sensorAcquisitionRunToken &+= 1
+        sensorAcquisitionDeadline?.cancel(); sensorAcquisitionDeadline = nil
+        sensorAcquisitionFirstDataTimeout?.cancel(); sensorAcquisitionFirstDataTimeout = nil
+        sensorAcquisitionWriteTimeout?.cancel(); sensorAcquisitionWriteTimeout = nil
+        sensorAcquisitionQuiescenceTimeout?.cancel(); sensorAcquisitionQuiescenceTimeout = nil
+        sensorAcquisitionWriteAwaitingAck = false
+        sensorAcquisition.disconnected()
+        closeWireEvidenceConnection()
+        confirmedCommandWritesOutstanding = 0
+        sensorCommandLaneTaintedUntilReconnect = false
+        sensorRecoveryDisconnectRequested = false
         // The strap forgets the realtime-HR toggle across a disconnect; the post-bond branch re-arms it
         // from `wantsRealtime`. Clear only the "what we last sent" flag — `screenWantsRealtime` /
         // `keepRealtimeForData` (and thus `wantsRealtime`) are intent and must survive a reconnect so the
@@ -6126,7 +6708,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // length offset + constant), producing corrupt/empty data for the whole unattended session until
         // the user manually taps connect.
         selectedModel = .persisted
-        reassembler = Reassembler(family: selectedModel.deviceFamily)
+        reassembler = CharacteristicReassembler(family: selectedModel.deviceFamily)
         router.family = selectedModel.deviceFamily
         router.deviceId = deviceId   // #1706: attribute this connection's alarm readback
         configureCollectorFamily()
@@ -6289,6 +6871,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 // fires for a 5/MG strap. Live HR/battery come from the standard profiles; this just
                 // opens the puffin session. Unverified on real MG hardware.
                 cmdCharacteristic = c
+                restoreSensorCleanupDebtIfOwed(for: peripheral, family: .whoop5)
                 // #1635: once the give-up has latched, the hello is what ends the link — skip it and let
                 // the standard-profile HR stream keep running. Consumed unconditionally so an explicit
                 // Connect's single retry belongs to this session and cannot leak into a later automatic one.
@@ -6375,6 +6958,17 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     public func peripheral(_ peripheral: CBPeripheral,
                            didWriteValueFor characteristic: CBCharacteristic,
                            error: Error?) {
+        // Acquisition writes are serialized and own their callback. CoreBluetooth does not
+        // include an opcode in this callback, so consume it before the generic bond/handshake path.
+        if sensorAcquisitionWriteAwaitingAck,
+           characteristic.uuid == cmdCharacteristic?.uuid {
+            sensorAcquisitionWriteAwaitingAck = false
+            advanceSensorAcquisitionWrite(succeeded: error == nil)
+            return
+        }
+        if confirmedCommandWritesOutstanding > 0 {
+            confirmedCommandWritesOutstanding -= 1
+        }
         if let error = error {
             log("Confirmed write failed: \(error.localizedDescription)")
             // #1635: a failed write owes no ack. Leaving the window open would let the NEXT completion on
@@ -6496,6 +7090,15 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 requestNotify(c, on: peripheral, reason: "post-bond puffin")   // #613: force re-arm on restore
             }
             enableLiveNotifications(reason: "post-bond 5/MG")   // standard HR/battery that failed pre-bond
+            if sensorAcquisition.cleanupRequired {
+                // A relaunch/link loss is recovery-only: establish normal handshake state, then
+                // send the idempotent stop contract before any ordinary custom command.
+                connectHandshakeDone = true
+                state.historyReady = true
+                whoop5SessionStarted = true
+                recoverUnknownSensorProducerIfNeeded()
+                return
+            }
             // Arm realtime HR with puffin framing — the verified step that makes a bonded 5/MG strap start
             // streaming (issue #17). Once per connection; keep-alive skips 5/MG, so this is the trigger.
             // (Opening Live later also arms it via startRealtime(), now that send() routes the 5/MG toggle.)
@@ -6840,6 +7443,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         }
         guard let data = characteristic.value else { return }
         let bytes = [UInt8](data)
+        // Level A is authoritative: persist the exact notification value before routing,
+        // reassembly, packet classification, or any semantic decoder can touch it.
+        guard captureSensorWireEvidence(bytes, characteristic: characteristic) else { return }
         lastDataAt = Date()   // feed the liveness watchdog on every notification
         // #1809: count BEFORE the per-characteristic switch below, so the tally covers every inbound
         // frame including ones no branch consumes - the epitaph must answer "did anything arrive at all".
@@ -6913,7 +7519,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
              BLEManager.cmdNotifyChar,
              BLEManager.eventNotifyChar:
             // Reassemble (no-op for already-complete frames) then route each complete frame.
-            for frame in reassembler.feed(bytes) {
+            for frame in reassembler.feed(bytes, characteristicID: characteristic.uuid.uuidString) {
                 if backfilling, BLEManager.isOffloadFrame(frame, family: .whoop4) {
                     // Historical replay is bulk sync traffic, not live UI traffic. Feed it only to
                     // the Backfiller; parsing every record through FrameRouter updates SwiftUI for
@@ -6998,8 +7604,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // timestamps are already real-unix seconds.) Live HR/battery still also come from the
             // standard 0x2A37 / 0x2A19 profiles handled above.
             if BLEManager.whoop5NotifyChars.contains(characteristic.uuid) {
-                for frame in reassembler.feed(bytes) {
+                if Whoop5RawImu.isCandidateRealtimeHeaderFragment(bytes),
+                   sensorAcquisition.phase == .awaitingQuiescence {
+                    noteRealtimeImuCandidateAfterStop(validated: false)
+                }
+                for frame in reassembler.feed(bytes, characteristicID: characteristic.uuid.uuidString) {
                     let isOffload = backfilling && BLEManager.isOffloadFrame(frame, family: .whoop5)
+                    noteSensorAcquisitionFirmwareResponse(frame)
                     noteWhoop5R22Telemetry(frame, duringOffload: isOffload)   // #174 deep-data telemetry
                     // Durable EVENT-frame log for deep-data research (#103) — BEFORE the offload
                     // branch, so it sees both live events and their history replays (either path
@@ -7015,6 +7626,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                     // and applies its own switch/window/retention gates inside.
                     let imuFrameReceivedAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
                     imuRecorder.ingestFrame(frame, isOffload: isOffload, receivedAtMs: imuFrameReceivedAtMs)
+                    if !isOffload, Whoop5RawImu.isCandidateRealtimePacket(frame) {
+                        if Whoop5RawImu.rawColumns(frame) != nil {
+                            noteValidatedRealtimeImu(frame)
+                        } else if sensorAcquisition.phase == .awaitingQuiescence {
+                            noteRealtimeImuCandidateAfterStop(validated: false)
+                        }
+                    }
                     // #423: the queryable twin of that diagnostics line — persist the decoded 100 Hz 6-axis
                     if isOffload {
                         // Same policy as WHOOP4: historical offload frames are bulk sync traffic.

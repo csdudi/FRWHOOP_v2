@@ -6,7 +6,7 @@ import WhoopStore
 struct RawDataCollectorView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var live: LiveState
-    @StateObject private var store = RawDataSessionStore()
+    @StateObject private var store = RawDataSessionStore.shared
 
     @State private var exportingId: String?
     @State private var deleteCandidate: RawDataSessionStore.Session?
@@ -41,13 +41,9 @@ struct RawDataCollectorView: View {
             }
         }
         .task {
-            // Restore a session after navigation/process lifecycle changes. The BLE layer rejects a
-            // duplicate arm, so this is safe when capture never stopped.
-            if let active = store.active, live.bonded { _ = model.ble.startGroundTruthRawCapture(sessionId: active.id) }
+            // Persisted session metadata is never authority to re-arm a stock producer.
+            // Recovery is stop-first; only the explicit Start button can arm IMU capture.
             await refreshImuCoverage()
-        }
-        .onChangeCompat(of: live.bonded) { bonded in
-            if bonded, let active = store.active { _ = model.ble.startGroundTruthRawCapture(sessionId: active.id) }
         }
         .confirmationDialog("Delete this session?", isPresented: Binding(
             get: { deleteCandidate != nil }, set: { if !$0 { deleteCandidate = nil } }
@@ -110,7 +106,7 @@ struct RawDataCollectorView: View {
         } else {
             NoopButton("Start raw-data session", systemImage: "record.circle", kind: .primary,
                        fullWidth: true) { start() }
-                .disabled(!live.bonded)
+                .disabled(!live.bonded || !model.whoop5Detected)
         }
     }
 
@@ -286,15 +282,23 @@ struct RawDataCollectorView: View {
     }
 
     private func start() {
-        guard let session = store.start(deviceId: model.ble.deviceId) else { return }
-        guard model.ble.startGroundTruthRawCapture(sessionId: session.id) else {
-            store.stop(); store.removeMetadata(session.id); return
+        guard let session = store.start(
+            deviceId: model.ble.deviceId,
+            peripheralId: model.ble.connectedPeripheralUUID
+        ) else { return }
+        guard model.ble.startSensorCapture(
+            .imu,
+            duration: RawCaptureWindow.researchSessionDefaultSeconds
+        ) else {
+            if store.stop(sessionId: session.id, peripheralId: session.peripheralId) {
+                _ = store.removeMetadata(session.id)
+            }
+            return
         }
     }
 
     private func stop() async {
-        await model.ble.stopGroundTruthRawCapture()
-        store.stop()
+        _ = await model.ble.stopSensorCapture()
         await refreshImuCoverage()
     }
 

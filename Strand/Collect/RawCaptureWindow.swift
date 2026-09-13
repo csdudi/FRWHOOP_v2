@@ -1,13 +1,17 @@
 import Foundation
+import WhoopProtocol
 
 /// Bounded, on-demand raw-capture window. Never 24/7 — clamps to a sane max.
 /// The Collector ORs `isActive(at:)` into its raw-persist gate; the deadline
 /// auto-expires the window so a missed stop callback can't leak raw forever.
 struct RawCaptureWindow {
     static let minSeconds: TimeInterval = 1
-    // A manually stopped research session may legitimately last for hours. It is still bounded so an
-    // interrupted UI/process cannot accidentally turn the opt-in capture into permanent 24/7 logging.
-    static let maxSeconds: TimeInterval = 24 * 60 * 60
+    /// The UI starts a short research window by default. The controller deadline, not a view timer,
+    /// owns producer shutdown if the app remains alive but the user never taps Stop.
+    static let researchSessionDefaultSeconds = SensorAcquisitionController.defaultResearchDurationSeconds
+    /// A hard safety ceiling for any caller, including future lab UI. High-rate capture is not a
+    /// general-purpose always-on mode.
+    static let maxSeconds = SensorAcquisitionController.maximumDurationSeconds
     static func clamp(_ s: TimeInterval) -> TimeInterval { min(max(s, minSeconds), maxSeconds) }
 
     private var deadline: TimeInterval?       // monotonic deadline; nil = inactive

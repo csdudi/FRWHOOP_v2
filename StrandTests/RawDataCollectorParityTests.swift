@@ -49,12 +49,19 @@ final class RawDataCollectorParityTests: XCTestCase {
                        "Raw-data collector parity oracle copies must change together")
     }
 
-    func testAppleKeepsTheOffSessionRealtimeImuFailSafe() throws {
+    func testAppleImuControlIsNarrowAndControllerOwned() throws {
         let source = try String(contentsOf: repoRoot.appendingPathComponent("Strand/BLE/BLEManager.swift"))
-        XCTAssertTrue(source.contains("stopUnexpectedRealtimeImu(frame, isOffload: isOffload)"))
-        XCTAssertTrue(source.contains("frame[8] == 43 || frame[8] == 51"))
-        XCTAssertTrue(source.contains("send(.stopRawData, payload: [0x01]"))
-        XCTAssertTrue(source.contains("send(.toggleIMUMode, payload: [0x01, 0x00]"))
+        XCTAssertTrue(source.contains("func startSensorCapture(_ kind: SensorCaptureKind, duration:"))
+        XCTAssertTrue(source.contains("func stopSensorCapture() async -> Bool"))
+        XCTAssertTrue(source.contains("Self.isVerifiedSensorAction(action)"))
+        XCTAssertTrue(source.contains("command == .startRawData"))
+        XCTAssertTrue(source.contains("command == .stopRawData"))
+        XCTAssertTrue(source.contains("command == .toggleIMUMode"))
+        XCTAssertFalse(source.contains("func captureRawAccel("))
+        XCTAssertFalse(source.contains("func startGroundTruthRawCapture("))
+        XCTAssertFalse(source.contains("func stopGroundTruthRawCapture("))
+        XCTAssertFalse(source.contains("ENABLE_OPTICAL_DATA"))
+        XCTAssertFalse(source.contains("TOGGLE_OPTICAL_MODE"))
     }
 
     /// FRWHOOP issue #1: the Apple-side routing/repair seams are platform-specific (Android routes

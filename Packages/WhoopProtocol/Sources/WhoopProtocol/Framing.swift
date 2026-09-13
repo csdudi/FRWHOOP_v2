@@ -259,6 +259,21 @@ public final class Reassembler {
     }
 
     public func feed(_ fragment: [UInt8]) -> [[UInt8]] {
+        // CoreBluetooth normally hands us an intact ATT notification. On 5/MG, a valid puffin header at
+        // the start of a new notification denotes a new envelope, not continuation bytes for an older
+        // incomplete envelope. This matters for the observed 244-byte v20/v21 header prefixes: joining
+        // two prefixes manufactures a CRC-invalid frame. Headerless payload continuations still append.
+        if family == .whoop5, let declared = puffinDeclaredTotal(fragment) {
+            if fragment.count == declared {
+                // An intact short frame (commonly realtime type 40) must not be spliced into a buffered
+                // historical prefix. Preserve the older partial window for a later headerless tail.
+                return [fragment]
+            }
+            if fragment.count < declared, buf.count > head {
+                buf.removeAll(keepingCapacity: true)
+                head = 0
+            }
+        }
         buf.append(contentsOf: fragment)
         var out: [[UInt8]] = []
         while true {
@@ -296,6 +311,16 @@ public final class Reassembler {
         }
         compact()
         return out
+    }
+
+    private func puffinDeclaredTotal(_ fragment: [UInt8]) -> Int? {
+        guard fragment.count >= 8, fragment[0] == 0xAA, fragment[1] == 0x01 else { return nil }
+        let total = (Int(fragment[2]) | (Int(fragment[3]) << 8)) + 8
+        guard total >= 12, total <= Self.maxFrameBytes,
+              crc16Modbus(fragment, 0, 6) == (UInt16(fragment[6]) | (UInt16(fragment[7]) << 8)) else {
+            return nil
+        }
+        return total
     }
 
     /// Index of the first 0xAA at or after `head` in the live window, or nil if none remain.

@@ -25,6 +25,29 @@ final class RawDataSessionStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.sessions.first, session)
     }
 
+    func testLifecycleOwnerStopsOnlyMatchingPhysicalSession() throws {
+        let directory = try temporaryDirectory()
+        let store = RawDataSessionStore(directory: directory)
+        let session = try XCTUnwrap(store.start(deviceId: "strap", peripheralId: "peripheral-A",
+                                                now: Date(timeIntervalSince1970: 100)))
+        XCTAssertFalse(store.stop(sessionId: session.id, peripheralId: "peripheral-B",
+                                  now: Date(timeIntervalSince1970: 105)))
+        XCTAssertTrue(try XCTUnwrap(store.sessions.first).active)
+        XCTAssertTrue(store.stop(sessionId: session.id, peripheralId: "peripheral-A",
+                                 now: Date(timeIntervalSince1970: 106)))
+        XCTAssertEqual(try XCTUnwrap(store.sessions.first).endedAtMs, 106_000)
+        XCTAssertFalse(store.stop(sessionId: session.id, peripheralId: "peripheral-A",
+                                  now: Date(timeIntervalSince1970: 107)))
+        XCTAssertTrue(store.reconcileProducerStopped(sessionId: session.id,
+                                                     peripheralId: "peripheral-A",
+                                                     now: Date(timeIntervalSince1970: 108)))
+        XCTAssertFalse(store.reconcileProducerStopped(sessionId: session.id,
+                                                      peripheralId: "peripheral-B",
+                                                      now: Date(timeIntervalSince1970: 108)))
+        XCTAssertEqual(try XCTUnwrap(RawDataSessionStore(directory: directory).sessions.first).endedAtMs,
+                       106_000)
+    }
+
     func testMarkersCanBeAddedEditedDeletedAndExported() throws {
         let store = RawDataSessionStore(directory: try temporaryDirectory())
         let session = try XCTUnwrap(store.start(deviceId: "strap", now: Date(timeIntervalSince1970: 100)))
