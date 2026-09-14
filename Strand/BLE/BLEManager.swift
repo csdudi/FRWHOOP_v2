@@ -617,6 +617,10 @@ public final class BLEManager: NSObject, ObservableObject {
     private var strapNewestTs: Int?
     /// Fires if the strap goes silent mid-offload; re-armed on every frame during backfill.
     private var backfillTimeout: DispatchWorkItem?
+    /// T2-2: coalesce idle-watchdog re-arms to at most once per second (±1 s accuracy is fine).
+    private var lastBackfillTimeoutArm: ContinuousClock.Instant?
+    /// T2-2: exact ack count this session; UI publishes every 10th chunk (Android twin).
+    private var ackedChunksThisSession = 0
     /// Periodic opportunistic upload while connected. Without it, upload only fires at connect +
     /// backfill-exit, so during a long live session decoded rows pile up locally and the server
     /// (dashboard) lags. Started on bond, cancelled on disconnect.
@@ -3072,10 +3076,13 @@ public final class BLEManager: NSObject, ObservableObject {
     /// the Backfiller; it is passed here only for logging.
     func ackHistoricalChunk(trim: UInt32, endData: [UInt8]) {
         send(.historicalDataResult, payload: [0x01] + endData, writeType: .withResponse)
-        // Progress signal for the "Syncing strap history…" UI (#77). Same main-queue delegate path as
-        // the other state mutations (e.g. lastSyncedAt in exitBackfilling). NOT historicalAckLogCounter
-        // — that's a puffin-write log throttle that never increments on WHOOP 4.
-        state.syncChunksThisSession += 1
+        // Progress signal for the "Syncing strap history…" UI (#77). Republish every 10th chunk only —
+        // @Published syncChunksThisSession drives SwiftUI across many screens. The internal counter stays
+        // exact; exitBackfilling flushes the final value. Twin of Android WhoopBleClient.ackHistoricalChunk.
+        ackedChunksThisSession += 1
+        if ackedChunksThisSession % 10 == 0 {
+            state.syncChunksThisSession = ackedChunksThisSession
+        }
     }
 
     // MARK: Backfill helpers
@@ -3142,6 +3149,8 @@ public final class BLEManager: NSObject, ObservableObject {
         state.backfilling = true
         state.postOffloadBurstInProgress = true
         state.syncChunksThisSession = 0
+        ackedChunksThisSession = 0
+        lastBackfillTimeoutArm = nil
         state.rejectedFramesThisSession = 0
         state.rejectedFramesUnarchived = 0
         state.decodedChunksThisSession = 0
@@ -3223,6 +3232,9 @@ public final class BLEManager: NSObject, ObservableObject {
     /// — a short watchdog cut sessions short mid-drain. Longer = more records drained per session.
     static let backfillIdleTimeoutSeconds = 60
     private func armBackfillTimeout() {
+        let now = ContinuousClock.Instant.now
+        if let last = lastBackfillTimeoutArm, now - last < .seconds(1) { return }
+        lastBackfillTimeoutArm = now
         backfillTimeout?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -3290,6 +3302,10 @@ public final class BLEManager: NSObject, ObservableObject {
         lastOffloadFrameAt = Date()
         backfillTimeout?.cancel()
         backfillTimeout = nil
+        lastBackfillTimeoutArm = nil
+        if ackedChunksThisSession > 0 {
+            state.syncChunksThisSession = ackedChunksThisSession
+        }
         backfillFrameQueue.removeAll()
         log("Backfill: session ended — reason=\(reason)")
         // Inactivity reminder (#419): read-only hook on the natural offload completion (no cadence
@@ -6543,6 +6559,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         }
         state.historyPendingSync = false   // #1164: a stale "pending" must not outlive the link
         state.syncChunksThisSession = 0
+        ackedChunksThisSession = 0
         // A mid-sync disconnect bypasses exitBackfilling, so clear the reject counters here too —
         // otherwise a stale non-zero count survives until the next beginBackfill. (#77/#91)
         state.rejectedFramesThisSession = 0
