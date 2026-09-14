@@ -984,7 +984,11 @@ public final class LiveState: ObservableObject {
         // "Discovered" with it. A fully custom name with no possessive stays a known gap. Kotlin twin in
         // `redactStrapLogPii` as `PII_DEVICE_NAME_RE`.
         out = out.replacingOccurrences(
-            of: "[\\p{L}\\p{N}_.\\-]+(['\u{2019}]s\\s+(?i:whoop))",
+            // Only attempt at the start of a token, and consume it without backtracking.
+            // A full sensor hex dump is one long token with no possessive suffix. The
+            // old unanchored greedy pattern retried every suffix of it, taking seconds
+            // on the main actor before the historical chunk could be acknowledged.
+            of: "(?<![\\p{L}\\p{N}_.\\-])[\\p{L}\\p{N}_.\\-]++(['\u{2019}]s\\s+(?i:whoop))",
             with: "<name>$1", options: .regularExpression)
         return out
     }

@@ -868,6 +868,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// (its else path, under the cap) and on disconnect — NOT unconditionally on every HISTORY_COMPLETE,
     /// so a strap that slices one offload into many completions can't reset the cap each slice (#25).
     private var consecutiveAutoContinues = 0
+    private var silentOffloadRecovery = SilentOffloadRecovery()
     /// #battery: consecutive offload sessions that banked ZERO sensor rows — a clean HISTORY_COMPLETE-empty
     /// OR an idle-timeout STALL. Feeds BackfillPolicy's exponential backoff so the 15-min periodic poll
     /// stops spinning the radio on a strap returning nothing (a capture showed ~6 empty stalls/hour with no
@@ -3389,6 +3390,11 @@ public final class BLEManager: NSObject, ObservableObject {
         // never a fresh `backfiller.sessionRowsPersisted` re-read that a re-kicked session / trailing frames
         // could have mutated across the offload boundary.
         let persistedSensorRows = (snapshot?.sessionRowsPersisted ?? 0) > 0
+        let retrySilentOffload = silentOffloadRecovery.consumeRetry(
+            timedOut: reason == "timeout", connected: state.connected && state.bonded,
+            ackedChunks: ackedChunksThisSession, persistedRows: persistedSensorRows,
+            persistStalled: snapshot?.persistStalled ?? true,
+            clockUntrusted: futureClockBanner != nil)
         let successfulDataExit = BacklogBurstDrainPolicy.committedDataExit(
             historyComplete: reason == "HISTORY_COMPLETE",
             timedOut: reason == "timeout",
@@ -3581,6 +3587,12 @@ public final class BLEManager: NSObject, ObservableObject {
             maybeAutoContinueBackfill(trimAdvanced: trimAdvanced,
                                       persistedSensorRows: persistedSensorRows,
                                       successfulDataExit: successfulDataExit)
+            if retrySilentOffload {
+                // Reuse the normal event floor (90s from request), including its delayed
+                // retry. No abort/reset/trim command, and no invented acknowledgement.
+                log("Backfill: silent request — retrying once at the event floor; another empty timeout backs off")
+                requestSync(.connect)
+            }
         } else {
             // User abort is terminal too. It never changes lastSyncedAt, but rows from this or an earlier
             // auto-continued slice are already durable and must not leave the burst gate latched forever.

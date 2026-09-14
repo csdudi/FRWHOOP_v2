@@ -76,3 +76,20 @@ enum BackfillPolicy {
         }
     }
 }
+
+/// A silent SEND_HISTORICAL_DATA is not evidence that history is empty. One ordinary
+/// retry recovered a stalled phone session. Bound recovery independently of the
+/// productive-burst counter, and retain the budget across reconnects in this process.
+struct SilentOffloadRecovery {
+    private var usedRetry = false
+
+    mutating func consumeRetry(timedOut: Bool, connected: Bool, ackedChunks: Int,
+                               persistedRows: Bool, persistStalled: Bool,
+                               clockUntrusted: Bool) -> Bool {
+        if persistedRows { usedRetry = false; return false }
+        guard timedOut, connected, ackedChunks == 0, !persistStalled,
+              !clockUntrusted, !usedRetry else { return false }
+        usedRetry = true
+        return true
+    }
+}

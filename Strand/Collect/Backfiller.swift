@@ -47,7 +47,8 @@ extension WhoopStore: BackfillStoreWriting {}
 
 // MARK: - Offload chunk phase timing (T2-0)
 
-/// One HISTORY_END commit sample. Phases are measured inside `Backfiller.finishChunk` only.
+/// One HISTORY_END handler sample, including time awaiting main-actor callbacks.
+/// Excludes time queued before the handler and the subsequent BLE write confirmation.
 struct BackfillChunkPhaseSample: Sendable {
     let frameCount: Int
     let gapMs: Int?
@@ -56,6 +57,9 @@ struct BackfillChunkPhaseSample: Sendable {
     let rawMs: Int
     let imuMs: Int
     let ackMs: Int
+    var totalMs: Int = 0
+    var diagnosticsMs: Int = 0
+    var archiveMs: Int = 0
 }
 
 // MARK: - Backfiller
@@ -66,10 +70,11 @@ struct BackfillChunkPhaseSample: Sendable {
 ///   decode known → await insert (decoded durable) →
 ///   await enqueueRawBatch (raw durable) →
 ///   await setCursor(strap_trim) →
-///   ackTrim (link-layer confirmed ack to strap)
+///   ackTrim (submit a .withResponse acknowledgement)
 ///
-/// A chunk is forgotten only after decoded AND raw are both locally durable AND the ack
-/// (.withResponse) is link-layer confirmed. Never waits on the server.
+/// Required decoded/raw writes complete before submitting the acknowledgement.
+/// The BLE callback submits the write; it does not await link-layer confirmation.
+/// Never waits on the server.
 ///
 /// Runs on `BackfillActor` (off the main actor). BLE writes and UI tallies hop to the main actor via injected async closures.
 final class Backfiller {
@@ -229,8 +234,8 @@ final class Backfiller {
     private var spo2Dumped = 0
 
     /// T2-0: per-chunk wall-clock samples for offload latency forensics. Each sample covers ONE
-    /// `finishChunk` invocation (one HISTORY_END). Phases are measured on the Backfiller actor only —
-    /// they do NOT include BLE delegate queue wait or main-actor drain/yield overhead.
+    /// `finishChunk` invocation (one HISTORY_END). Total includes callback/actor waits;
+    /// queue wait before this handler and the subsequent BLE confirmation remain outside it.
     private var chunkPhaseSamples: [BackfillChunkPhaseSample] = []
     private var lastChunkArrival: CFAbsoluteTime?
 
@@ -443,6 +448,10 @@ final class Backfiller {
         let frames = samples.map(\.frameCount)
         let gaps = samples.compactMap(\.gapMs)
         var line = "Backfill: chunk phase timing n=\(samples.count) chunks"
+        line += " total p50/p99=\(p(samples.map(\.totalMs), 50))/\(p(samples.map(\.totalMs), 99))ms"
+        line += " (HISTORY_END processing through ACK submission, including callback waits)"
+        line += " diagnostics p50/p99=\(p(samples.map(\.diagnosticsMs), 50))/\(p(samples.map(\.diagnosticsMs), 99))ms"
+        line += " archive p50/p99=\(p(samples.map(\.archiveMs), 50))/\(p(samples.map(\.archiveMs), 99))ms"
         line += " decode p50/p99=\(p(decode, 50))/\(p(decode, 99))ms"
         line += " (parseFrame+extractHistoricalStreams+reject scan, Task.detached)"
         line += " insert p50/p99=\(p(insert, 50))/\(p(insert, 99))ms (store.insertAndMarkJobsOwed)"
@@ -451,17 +460,18 @@ final class Backfiller {
         line += " ack p50/p99=\(p(ack, 50))/\(p(ack, 99))ms (setCursor strap_trim + ackTrim callback)"
         line += " frames/chunk p50/p99=\(p(frames, 50))/\(p(frames, 99))"
         if !gaps.isEmpty {
-            line += " inter-chunk gap p50/p99=\(p(gaps, 50))/\(p(gaps, 99))ms (wall between HISTORY_END arrivals)"
+            line += " inter-chunk gap p50/p99=\(p(gaps, 50))/\(p(gaps, 99))ms (between HISTORY_END processing starts; includes queueing)"
         }
         return line
     }
 
-    /// T2-0: per-chunk detail for Connection test mode. Diagnostic only — never attributes BLE/main-actor wait.
+    /// Per-chunk elapsed time for Connection test mode; total includes callback waits, not BLE RTT.
     nonisolated static func chunkPhaseDetailLine(trim: UInt32, sample: BackfillChunkPhaseSample) -> String {
         var line = "offload chunk trim=\(trim) frames=\(sample.frameCount)"
         if let gap = sample.gapMs { line += " gapMs=\(gap)" }
         line += " decodeMs=\(sample.decodeMs) insertMs=\(sample.insertMs)"
         line += " rawMs=\(sample.rawMs) imuMs=\(sample.imuMs) ackMs=\(sample.ackMs)"
+        line += " totalMs=\(sample.totalMs) diagnosticsMs=\(sample.diagnosticsMs) archiveMs=\(sample.archiveMs)"
         return line
     }
 
@@ -641,6 +651,7 @@ final class Backfiller {
         let gapMs = lastChunkArrival.map { Int((chunkArrival - $0) * 1000) }
         lastChunkArrival = chunkArrival
         var decodeMs = 0, insertMs = 0, rawMs = 0, imuMs = 0, ackMs = 0
+        var diagnosticsMs = 0, archiveMs = 0
 
         // #773: corrupt future-RTC detection. A HISTORY_END carries the strap's own clock; a genuine offload
         // is always PAST-dated (it's banked history), so an end dated days into the future can only be a
@@ -663,7 +674,9 @@ final class Backfiller {
         func recordPhaseSample() async {
             let sample = BackfillChunkPhaseSample(frameCount: frameCount, gapMs: gapMs,
                                           decodeMs: decodeMs, insertMs: insertMs,
-                                          rawMs: rawMs, imuMs: imuMs, ackMs: ackMs)
+                                          rawMs: rawMs, imuMs: imuMs, ackMs: ackMs,
+                                          totalMs: Int((CFAbsoluteTimeGetCurrent() - chunkArrival) * 1000),
+                                          diagnosticsMs: diagnosticsMs, archiveMs: archiveMs)
             chunkPhaseSamples.append(sample)
             await emitConnection(Backfiller.chunkPhaseDetailLine(trim: trim, sample: sample))
         }
@@ -825,6 +838,7 @@ final class Backfiller {
             // (the "rejected frames" red herring users kept reporting — #77/#120). Drives both the
             // log wording below and the archive guard further down.
             let rejected = d.rejected
+            let diagnosticsStart = CFAbsoluteTimeGetCurrent()
             // Tally this chunk's outcome so a completed-but-empty session is distinguishable from a
             // caught-up one (#77 family): did it decode sensor rows, and was it console-only?
             await onChunk?(!decoded.isEmpty, decoded.isEmpty && rejected.isEmpty)
@@ -856,6 +870,7 @@ final class Backfiller {
                     await log?("Backfill: #1007 \(emptySkipped)/\(sample.count) sampled frame(s) all-zero (empty payload) - hex dump skipped")
                 }
             }
+            diagnosticsMs = Int((CFAbsoluteTimeGetCurrent() - diagnosticsStart) * 1000)
             // Commit the decoded rows FIRST (durable). Doing this before the reject archive means a
             // rare insert failure — which returns and re-sends the whole chunk next session — can't
             // leave duplicate lines in the append-only reject archive.
@@ -919,7 +934,10 @@ final class Backfiller {
             // chunk (no setCursor, no ack) so the strap re-sends it next session — no data loss
             // either way. (A full archive is reported as success by the sink; we still ack.)
             if !rejected.isEmpty, let rejectedSink {
-                guard await rejectedSink(rejected, trim, family) else {
+                let archiveStart = CFAbsoluteTimeGetCurrent()
+                let archived = await rejectedSink(rejected, trim, family)
+                archiveMs = Int((CFAbsoluteTimeGetCurrent() - archiveStart) * 1000)
+                guard archived else {
                     await log?("Backfill: rejected-frame archive failed (trim=\(trim)) — holding ack so the strap re-sends.")
                     persistStalled = true   // #57
                     await notePersistFailure(trim: trim, reason: "rejected archive failed")
