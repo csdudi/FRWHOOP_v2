@@ -7,6 +7,17 @@ final class BackfillPolicyTests: XCTestCase {
     private let fe = BackfillPolicy.eventFloorSeconds      // 90
     private let fp = BackfillPolicy.periodicFloorSeconds   // 900
 
+    func testConnectJustBeforeFloorRetriesAtFloorInsteadOfWaitingForPeriodicTimer() {
+        XCTAssertEqual(BackfillPolicy.eventRetryDelay(trigger: .connect, now: 1_000,
+                                                       lastBackfillAt: 915), 5.5)
+        XCTAssertEqual(BackfillPolicy.eventRetryDelay(trigger: .foreground, now: 1_000,
+                                                       lastBackfillAt: 915), 5.5)
+        XCTAssertNil(BackfillPolicy.eventRetryDelay(trigger: .connect, now: 1_000,
+                                                    lastBackfillAt: 910))
+        XCTAssertNil(BackfillPolicy.eventRetryDelay(trigger: .periodic, now: 1_000,
+                                                    lastBackfillAt: 915))
+    }
+
     func testFirstSyncAlwaysRuns() {
         XCTAssertTrue(BackfillPolicy.shouldRun(trigger: .periodic, now: 1000, lastBackfillAt: nil))
         XCTAssertTrue(BackfillPolicy.shouldRun(trigger: .strap, now: 1000, lastBackfillAt: nil))

@@ -5268,6 +5268,13 @@ public final class BLEManager: NSObject, ObservableObject {
                                        emptyStreak: max(emptySyncTracker.consecutiveEmptySyncs, consecutiveEmptyOffloads),
                                        clockUntrusted: clockUntrusted) else {
             log("Backfill: \(trigger) skipped (rate-limited; last \(last.map { Int(now - $0) } ?? -1)s ago)")
+            if let delay = BackfillPolicy.eventRetryDelay(trigger: trigger, now: now,
+                                                           lastBackfillAt: last) {
+                log("Backfill: \(trigger) retry scheduled in \(Int(delay.rounded()))s after event floor")
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.requestSync(trigger)
+                }
+            }
             return
         }
         if beginBackfill() {
