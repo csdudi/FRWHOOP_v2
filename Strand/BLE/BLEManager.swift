@@ -1434,7 +1434,13 @@ public final class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    private let storeBootstrap = BackfillStoreBootstrap()
+
     func bootstrapStore() async {
+        await storeBootstrap.run { [self] in await performBootstrapStore() }
+    }
+
+    private func performBootstrapStore() async {
         guard collector == nil else { return }
         // Surface store-open failures instead of swallowing them with `try?` (#222): a silent failure
         // here left `backfiller` nil forever and the only visible symptom was the downstream
@@ -3137,15 +3143,10 @@ public final class BLEManager: NSObject, ObservableObject {
             return false
         }
         guard backfillActor != nil else {
-            // Store not built yet (bootstrapStore failed or hasn't run). Do NOT force live HR — the
-            // type-47 backfill is the metric source. RE-ATTEMPT the bootstrap here so a transient
-            // first-open failure self-heals: on iOS the data-protected store is unreadable while the
-            // phone is locked, so a background-reconnect bootstrap can fail and, with no retry, stay
-            // dead forever (#222). Each periodic tick now retries; the first one that runs after the
-            // device is unlocked rebuilds the store and backfill proceeds. bootstrapStore() guards on
-            // `collector == nil`, so this is a no-op once the store is up.
-            log("Backfill: store not ready — re-attempting bootstrap, will retry next tick")
-            Task { @MainActor in await self.bootstrapStore() }
+            // requestSync waits for the shared bootstrap and retries the same trigger
+            // once the complete pipeline is ready. A genuine open failure leaves retry
+            // to the next normal wake, so a locked/unavailable store cannot spin.
+            log("Backfill: store not ready — waiting for bootstrap before retrying sync")
             return false
         }
         // Capture the family at begin() (not init): selectedModel is reliably set by connect() before any
@@ -5291,6 +5292,16 @@ public final class BLEManager: NSObject, ObservableObject {
         }
         if beginBackfill() {
             UserDefaults.standard.set(now, forKey: BLEManager.backfillLastAtKey)
+        } else if backfillActor == nil {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await bootstrapStore()
+                // On failure leave recovery to the normal next wake, without a retry
+                // loop. On success retain the original trigger (manual stays manual).
+                guard backfillActor != nil else { return }
+                log("Backfill: store ready — resuming deferred \(trigger) request")
+                requestSync(trigger)
+            }
         }
     }
 

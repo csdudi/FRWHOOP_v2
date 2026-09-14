@@ -5,6 +5,44 @@ import XCTest
 /// strap from being re-offloaded every event floor (#77/#120/#216). Pure value logic, no CoreBluetooth seam.
 final class BackfillPolicyTests: XCTestCase {
 
+    @MainActor
+    func testConcurrentBootstrapCallersWaitForCompleteSetup() async {
+        let bootstrap = BackfillStoreBootstrap()
+        let entered = expectation(description: "setup entered")
+        let secondEntered = expectation(description: "second caller entered")
+        var release: CheckedContinuation<Void, Never>?
+        var starts = 0
+        var ready = false
+        var secondReturnedReady = false
+        let first = Task { @MainActor in
+            await bootstrap.run {
+                starts += 1
+                await withCheckedContinuation { continuation in
+                    release = continuation
+                    entered.fulfill()
+                }
+                ready = true
+            }
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        let second = Task { @MainActor in
+            secondEntered.fulfill()
+            await bootstrap.run { starts += 1 }
+            secondReturnedReady = ready
+        }
+        await fulfillment(of: [secondEntered], timeout: 1)
+        XCTAssertEqual(starts, 1)
+        XCTAssertFalse(ready)
+        release?.resume()
+        await first.value
+        await second.value
+        XCTAssertTrue(secondReturnedReady)
+        XCTAssertEqual(starts, 1)
+        // A completed failed attempt must not cache failure forever: callers can retry.
+        await bootstrap.run { starts += 1 }
+        XCTAssertEqual(starts, 2)
+    }
+
     func testSilentTimeoutGetsOneRetryUntilRealProgress() {
         var recovery = SilentOffloadRecovery()
         XCTAssertTrue(recovery.consumeRetry(timedOut: true, connected: true,
