@@ -60,6 +60,9 @@ final class ImuSessionFileStore {
     /// Session id → conflicted strap timestamps (mirror of `imu-conflicts.json`; loaded lazily).
     private var conflicts: [String: Set<Int64>] = [:]
 
+    /// Test-only: when true, appended-block verification always fails (exercises rollback).
+    var testFailAppendVerification = false
+
     /// `directory` overrides the whole directory (tests); `directoryComponent` + `defaultsKey` pick
     /// the namespace (bounded sessions vs the continuous recorder). Not private so tests can build
     /// isolated instances; production code uses `shared` / `continuous`.
@@ -422,12 +425,10 @@ final class ImuSessionFileStore {
     /// callers on a durability-critical path (the Backfiller's flush-before-ack seam) must check it.
     @discardableResult
     private func flushSession(_ id: String) -> Bool {
-        guard segmentFiles(id).allSatisfy({ validSegmentFile($0) }) else { return false }
         let keys = pending.keys.filter { $0.hasPrefix("\(id)/") }
         var succeeded = true
         for key in keys where !flushKey(key) { succeeded = false }
         return succeeded && !pending.keys.contains { $0.hasPrefix("\(id)/") }
-            && segmentFiles(id).allSatisfy({ validSegmentFile($0) })
     }
 
     @discardableResult
@@ -445,8 +446,6 @@ final class ImuSessionFileStore {
                 try FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
                 if !FileManager.default.fileExists(atPath: url.path) {
                     try header(bucket).write(to: url, options: .atomic)
-                } else if !validSegmentFile(url) {
-                    return false
                 }
                 let handle = try FileHandle(forWritingTo: url)
                 let originalOffset = try handle.seekToEnd()
@@ -454,7 +453,7 @@ final class ImuSessionFileStore {
                     try handle.write(contentsOf: encoded)
                     try handle.synchronize()
                     try handle.close()
-                    guard validSegmentFile(url) else {
+                    guard verifyAppendedBlock(in: url, at: originalOffset, expected: encoded) else {
                         rollbackSegment(url, to: originalOffset)
                         return false
                     }
@@ -478,9 +477,54 @@ final class ImuSessionFileStore {
         return true
     }
 
-    private func validSegmentFile(_ url: URL) -> Bool {
-        guard let data = try? Data(contentsOf: url) else { return false }
-        return decodeFile(data).complete
+    /// Verifies ONLY the block just appended at `offset`. Whole-file revalidation on every flush was
+    /// redundant: `scan` fully decodes every complete block the first time a segment is touched per
+    /// launch (building the timestamp index), and externally-corrupted mid-session files are detected
+    /// at that next launch's `scan`, not at flush time. The ack-critical contract is that appended
+    /// bytes are verified on disk before the Backfiller's ack.
+    private func verifyAppendedBlock(in url: URL, at offset: UInt64, expected: Data) -> Bool {
+        if testFailAppendVerification { return false }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        let length = expected.count
+        guard length > 0 else { return false }
+        try? handle.seek(toOffset: offset)
+        guard let read = try? handle.read(upToCount: length), read.count == length else { return false }
+        guard read == expected else { return false }
+        return decodeBlock(read) != nil
+    }
+
+    /// Decode one on-disk block's payload (the 12-byte header + compressed body written by `block`).
+    private func decodeBlock(_ data: Data) -> [Record]? {
+        let bytes = [UInt8](data)
+        guard data.count >= 12 else { return nil }
+        let count = int32(bytes, 0), rawSize = int32(bytes, 4), compressedSize = int32(bytes, 8)
+        guard count > 0, count <= Self.blockSeconds,
+              compressedSize > 0, 12 + compressedSize == data.count else { return nil }
+        let expectedRawSize = count * (20 + Self.payloadBytes)
+        guard rawSize == expectedRawSize,
+              let raw = inflate(Data(bytes[12..<(12 + compressedSize)]), size: rawSize) else { return nil }
+        let rawBytes = [UInt8](raw)
+        var rawOffset = 0
+        var blockRecords: [Record] = []
+        blockRecords.reserveCapacity(count)
+        for _ in 0..<count {
+            guard rawOffset + 20 + Self.payloadBytes <= rawBytes.count else { return nil }
+            let ts = Int64(bigEndianBytes: rawBytes, at: rawOffset)
+            let received = Int64(bigEndianBytes: rawBytes, at: rawOffset + 8)
+            let length = int32(rawBytes, rawOffset + 16)
+            rawOffset += 20
+            guard length == Self.payloadBytes, rawOffset + length <= rawBytes.count else { return nil }
+            var columns: [Int16] = []
+            columns.reserveCapacity(Self.sampleRate * Self.axes)
+            for index in stride(from: rawOffset, to: rawOffset + length, by: 2) {
+                columns.append(Int16(bitPattern: UInt16(rawBytes[index]) | UInt16(rawBytes[index + 1]) << 8))
+            }
+            rawOffset += length
+            blockRecords.append(Record(ts: ts, receivedAtMs: received, columns: columns))
+        }
+        guard rawOffset == rawBytes.count else { return nil }
+        return blockRecords
     }
 
     private func rollbackSegment(_ url: URL, to offset: UInt64) {
@@ -510,6 +554,8 @@ final class ImuSessionFileStore {
     private func segmentFile(_ id: String, _ bucket: Int64) -> URL { sessionDirectory(id).appendingPathComponent("imu-\(Self.utcName(bucket)).imus") }
     private func segmentFiles(_ id: String) -> [URL] { ((try? FileManager.default.contentsOfDirectory(at: sessionDirectory(id), includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "imus" }.sorted { $0.lastPathComponent < $1.lastPathComponent } }
     private func scan(_ url: URL) -> [Int64: UInt64] {
+        // Fully decodes every complete block on first touch per launch — sufficient validation for
+        // pre-existing segment bytes; appended blocks are verified separately in flushKey.
         var map: [Int64: UInt64] = [:]
         for record in decode((try? Data(contentsOf: url)) ?? Data()) {
             map[record.ts] = Self.columnsDigest(record.columns)
