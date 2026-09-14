@@ -312,8 +312,10 @@ final class ImuContinuousRecorder: ObservableObject {
     /// length + sample-count gate — a command acknowledgment or a same-type non-IMU frame never
     /// counts as a packet.
     func ingestFrame(_ frame: [UInt8], isOffload: Bool, receivedAtMs: Int64) {
-        guard let ts = Whoop5RawImu.baseTs(frame), Whoop5RawImu.rawColumns(frame) != nil else { return }
-        let ts64 = Int64(ts)
+        // Historical IMU is owned by the Backfiller session sink — skip decode entirely while disabled.
+        if !enabled && isOffload { return }
+        guard let decoded = Whoop5RawImu.decodeColumns(frame) else { return }
+        let ts64 = Int64(decoded.baseTs)
         if !isOffload {
             lastLivePacketAt = now()
             if enabled, phase == .startSent || phase == .waitingForConnection {
@@ -349,7 +351,7 @@ final class ImuContinuousRecorder: ObservableObject {
         }
         if openWindowId == nil, !deviceId.isEmpty { ensureWindow(deviceId: deviceId) }
         trackConflict(ts: ts64, frame: frame)
-        _ = store.append(deviceId: deviceId, frame: frame, receivedAtMs: receivedAtMs)
+        _ = store.append(deviceId: deviceId, ts: ts64, columns: decoded.columns, receivedAtMs: receivedAtMs)
         publish()
     }
 

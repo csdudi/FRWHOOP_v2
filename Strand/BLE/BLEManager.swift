@@ -1528,8 +1528,8 @@ public final class BLEManager: NSObject, ObservableObject {
                                 rejectedSink: { [weak self] frames, trim, family in
                                     self?.archiveRejectedFrames(frames, trim: trim, family: family) ?? true
                                 },
-                                imuSessionSink: { deviceId, frames in
-                                    ImuSessionFileStore.shared.persistHistoricalImu(deviceId: deviceId, frames: frames)
+                                imuSessionSink: { deviceId, records in
+                                    ImuSessionFileStore.shared.persistHistoricalImu(deviceId: deviceId, records: records)
                                 },
                                 onChunk: { [weak self] decoded, console in
                                     if decoded { self?.state.decodedChunksThisSession += 1 }

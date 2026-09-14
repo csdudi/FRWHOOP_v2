@@ -194,4 +194,13 @@ final class Whoop5RawImuTests: XCTestCase {
             return UInt8(hex[s...hex.index(after: s)], radix: 16)!
         }
     }()
+
+    func testDecodeColumnsMatchesSeparateBaseTsAndRawColumns() {
+        let frame = syntheticFrame(i: 3, axLSB: 4096, gxLSB: 100)
+        guard let decoded = Whoop5RawImu.decodeColumns(frame) else {
+            return XCTFail("decodeColumns returned nil for a valid synthetic frame")
+        }
+        XCTAssertEqual(decoded.baseTs, Whoop5RawImu.baseTs(frame))
+        XCTAssertEqual(decoded.columns, Whoop5RawImu.rawColumns(frame))
+    }
 }

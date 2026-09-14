@@ -61,21 +61,21 @@ final class BackfillerImuSessionTests: XCTestCase {
 
     func testHistoricalImuReachesSinkBeforeAck() async {
         let store = SpyStore()
-        var imuFramesSeen = 0
+        var imuRecordsSeen = 0
         var acked = false
         let backfiller = Backfiller(
             store: store,
             deviceId: "devA",
             ackTrim: { _, _ in acked = true },
-            imuSessionSink: { _, frames in
-                imuFramesSeen += frames.count
+            imuSessionSink: { _, records in
+                imuRecordsSeen += records.count
                 return true
             })
         backfiller.begin(family: .whoop5)
         await backfiller.ingest(makeValidImuFrame(unix: 1_500))
         await backfiller.ingest(hexBytes(whoop5HistoryEndHex))
 
-        XCTAssertEqual(imuFramesSeen, 1)
+        XCTAssertEqual(imuRecordsSeen, 1)
         XCTAssertTrue(acked)
         XCTAssertFalse(backfiller.persistStalled)
         XCTAssertTrue(store.operations.contains("cursor"))

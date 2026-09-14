@@ -140,7 +140,14 @@ final class ImuSessionFileStore {
 
     @discardableResult
     func append(deviceId: String, frame: [UInt8], receivedAtMs: Int64) -> Int {
-        appendRouting(deviceId: deviceId, frame: frame, receivedAtMs: receivedAtMs).count
+        guard let decoded = Whoop5RawImu.decodeColumns(frame) else { return 0 }
+        return append(deviceId: deviceId, ts: Int64(decoded.baseTs), columns: decoded.columns,
+                      receivedAtMs: receivedAtMs)
+    }
+
+    @discardableResult
+    func append(deviceId: String, ts: Int64, columns: [Int16], receivedAtMs: Int64) -> Int {
+        appendRouting(deviceId: deviceId, sourceTs: ts, columns: columns, receivedAtMs: receivedAtMs).count
     }
 
     /// Backfiller commit seam (FRWHOOP issue #1): append historical IMU buffers to every matching
@@ -148,11 +155,12 @@ final class ImuSessionFileStore {
     /// durably on disk — NO matching window is a success (nothing was owed), so an ordinary history
     /// sync never stalls on IMU. A false return makes the caller hold the trim ack (#57 pattern), so
     /// the strap re-sends the chunk next session instead of trimming past un-persisted session data.
-    func persistHistoricalImu(deviceId: String, frames: [[UInt8]],
+    func persistHistoricalImu(deviceId: String, records: [(baseTs: Int, columns: [Int16])],
                               receivedAtMs: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)) -> Bool {
         var touched: Set<String> = []
-        for frame in frames {
-            touched.formUnion(appendRouting(deviceId: deviceId, frame: frame, receivedAtMs: receivedAtMs))
+        for record in records {
+            touched.formUnion(appendRouting(deviceId: deviceId, sourceTs: Int64(record.baseTs),
+                                            columns: record.columns, receivedAtMs: receivedAtMs))
         }
         // A re-delivered chunk (an earlier held ack) arrives as exact duplicates that queue nothing,
         // but a failed first flush left those records PENDING — so flush every session for this
@@ -164,15 +172,25 @@ final class ImuSessionFileStore {
         return ok
     }
 
-    /// Route one raw 5/MG IMU buffer into every matching session window; returns the ids of sessions
+    func persistHistoricalImu(deviceId: String, frames: [[UInt8]],
+                              receivedAtMs: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)) -> Bool {
+        var records: [(baseTs: Int, columns: [Int16])] = []
+        records.reserveCapacity(frames.count)
+        for frame in frames {
+            guard let decoded = Whoop5RawImu.decodeColumns(frame) else { continue }
+            records.append((decoded.baseTs, decoded.columns))
+        }
+        return persistHistoricalImu(deviceId: deviceId, records: records, receivedAtMs: receivedAtMs)
+    }
+
+    /// Route one decoded 5/MG IMU buffer into every matching session window; returns the ids of sessions
     /// that QUEUED a new record. Duplicate policy (FRWHOOP issue #1): an identical payload at an
     /// already-stored strap second is discarded; a DIFFERENT payload keeps the first durable value
     /// and the second is recorded as conflict evidence — never silently merged or overwritten.
     /// Open live windows match by receipt time so the first complete one-second buffer after START
     /// is kept even when its source ts slightly predates the session wall clock.
-    private func appendRouting(deviceId: String, frame: [UInt8], receivedAtMs: Int64) -> Set<String> {
-        guard let ts = Whoop5RawImu.baseTs(frame), let columns = Whoop5RawImu.rawColumns(frame) else { return [] }
-        let sourceTs = Int64(ts)
+    private func appendRouting(deviceId: String, sourceTs: Int64, columns: [Int16],
+                               receivedAtMs: Int64) -> Set<String> {
         let receivedTs = receivedAtMs / 1_000
         var queued: Set<String> = []
         for window in windows() where window.deviceId == deviceId {
