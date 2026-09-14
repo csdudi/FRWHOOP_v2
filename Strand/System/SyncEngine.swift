@@ -134,11 +134,18 @@ final class SyncEngine {
     private func runRescore(token: String, reason: SyncDrainPolicy.WakeReason,
                             host: AppModel) async -> Bool {
         switch reason {
-        case .offloadComplete, .bleEvent:
+        case .offloadComplete, .bleEvent, .stateRestoration:
+            // CoreBluetooth may restore us for a short background wake. An owed
+            // re-score can take minutes, so let the background policy defer it
+            // instead of restarting the same pass on every restored launch.
             await RescoreBackgroundScheduler.run(log: { [live = host.live] line in
                 live.append(log: line)
             }) {
-                await host.intelligence.analyzeRecent(skipIfUnchanged: true)
+                if RescoreBackgroundScheduler.isRescoreOwed {
+                    await host.runDeferredRescoreIfOwed()
+                } else {
+                    await host.intelligence.analyzeRecent(skipIfUnchanged: true)
+                }
             }
         default:
             if RescoreBackgroundScheduler.isRescoreOwed {

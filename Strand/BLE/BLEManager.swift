@@ -594,7 +594,7 @@ public final class BLEManager: NSObject, ObservableObject {
     // MARK: Upload / server sync — REMOVED for Strand (standalone, fully on-device).
 
     // MARK: Backfill
-    private var backfiller: Backfiller?
+    private var backfillActor: BackfillActor?
     /// True while a historical offload session is in progress (frames route to Backfiller).
     private var backfilling = false
     /// Wall time of the most recent offload frame OR HISTORY_COMPLETE — drives the #174 deep-packet
@@ -617,6 +617,10 @@ public final class BLEManager: NSObject, ObservableObject {
     private var strapNewestTs: Int?
     /// Fires if the strap goes silent mid-offload; re-armed on every frame during backfill.
     private var backfillTimeout: DispatchWorkItem?
+    /// T2-2: coalesce idle-watchdog re-arms to at most once per second (±1 s accuracy is fine).
+    private var lastBackfillTimeoutArm: ContinuousClock.Instant?
+    /// T2-2: exact ack count this session; UI publishes every 10th chunk (Android twin).
+    private var ackedChunksThisSession = 0
     /// Periodic opportunistic upload while connected. Without it, upload only fires at connect +
     /// backfill-exit, so during a long live session decoded rows pile up locally and the server
     /// (dashboard) lags. Started on bond, cancelled on disconnect.
@@ -864,6 +868,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// (its else path, under the cap) and on disconnect — NOT unconditionally on every HISTORY_COMPLETE,
     /// so a strap that slices one offload into many completions can't reset the cap each slice (#25).
     private var consecutiveAutoContinues = 0
+    private var silentOffloadRecovery = SilentOffloadRecovery()
     /// #battery: consecutive offload sessions that banked ZERO sensor rows — a clean HISTORY_COMPLETE-empty
     /// OR an idle-timeout STALL. Feeds BackfillPolicy's exponential backoff so the 15-min periodic poll
     /// stops spinning the radio on a strap returning nothing (a capture showed ~6 empty stalls/hour with no
@@ -942,12 +947,8 @@ public final class BLEManager: NSObject, ObservableObject {
     private var rawDataCommandGate = false
     /// Once-per-link re-entry guard for the recorder's post-bond (re)arm; reset on disconnect.
     private var imuRecorderArmedLink = false
-    /// Ordered queue of frames awaiting drain through the serial Backfiller task.
-    private var backfillFrameQueue: [[UInt8]] = []
-    /// True while the drain task is running (prevents a second drain task from launching).
+    /// T2-1: legacy main-actor drain flag (offload queue lives on `BackfillActor`).
     private var backfillDraining = false
-    /// Keep each main-actor drain slice small enough that SwiftUI can process input/paint between slices.
-    private static let backfillDrainBatchSize = 12
 
     /// Records WHOOP 5/MG puffin frames to a JSON file for protocol mapping. Passive (read-only on the
     /// strap) and gated by the Settings → Experimental "Record puffin frames" toggle; a no-op for
@@ -1512,38 +1513,50 @@ public final class BLEManager: NSObject, ObservableObject {
         #else
         let postOffloadJobKinds = [SyncJobKind.rescore.rawValue]
         #endif
-        backfiller = Backfiller(store: store, deviceId: deviceId,
-                                ackTrim: { [weak self] trim, endData in
-                                    self?.ackHistoricalChunk(trim: trim, endData: endData)
-                                },
-                                onBankedOffload: { [weak self] c in
-                                    guard let self else { return }
-                                    self.offloadChunks += 1
-                                    self.offloadHr += c.hr; self.offloadRr += c.rr
-                                    self.offloadGravity += c.gravity; self.offloadResp += c.resp
-                                    self.offloadSkinTemp += c.skinTemp; self.offloadSpo2 += c.spo2
-                                },
-                                enableRawCapture: enableRawCapture,
-                                log: { [weak self] s in self?.log(s) },
-                                rejectedSink: { [weak self] frames, trim, family in
-                                    self?.archiveRejectedFrames(frames, trim: trim, family: family) ?? true
-                                },
-                                imuSessionSink: { deviceId, records in
-                                    ImuSessionFileStore.shared.persistHistoricalImu(deviceId: deviceId, records: records)
-                                },
-                                onChunk: { [weak self] decoded, console in
-                                    if decoded { self?.state.decodedChunksThisSession += 1 }
-                                    if console { self?.state.consoleChunksThisSession += 1 }
-                                },
-                                // Connection & Sync test mode (Test Centre): the cheap gate + tagged sink the
-                                // Backfiller checks before building any .connection diagnostic line. The gate is
-                                // one UserDefaults bool; nothing is emitted (or built) when the mode is off.
-                                connectionActive: { TestCentre.active(.connection) },
-                                connectionLog: { [weak self] s in self?.state.append(log: s, domain: .connection) },
-                                // UNIVERSAL clock-drift: bank the strap's historical layout so the export's
-                                // universal clock-drift line is firmware-aware on every export. Unconditional.
-                                firmwareLayout: { [weak self] v in self?.state.setStrapFirmwareLayout(v) },
-                                postOffloadJobKinds: postOffloadJobKinds)
+        let actor = BackfillActor()
+        let hooks = BackfillMainHooks(
+            ackTrim: { [weak self] trim, endData in
+                await MainActor.run { self?.ackHistoricalChunk(trim: trim, endData: endData) }
+            },
+            onBankedOffload: { [weak self] c in
+                await MainActor.run {
+                    guard let self else { return }
+                    self.offloadChunks += 1
+                    self.offloadHr += c.hr; self.offloadRr += c.rr
+                    self.offloadGravity += c.gravity; self.offloadResp += c.resp
+                    self.offloadSkinTemp += c.skinTemp; self.offloadSpo2 += c.spo2
+                }
+            },
+            log: { [weak self] s in await MainActor.run { self?.log(s) } },
+            rejectedSink: { [weak self] frames, trim, family in
+                await MainActor.run { self?.archiveRejectedFrames(frames, trim: trim, family: family) ?? true }
+            },
+            onChunk: { [weak self] decoded, console in
+                await MainActor.run {
+                    if decoded { self?.state.decodedChunksThisSession += 1 }
+                    if console { self?.state.consoleChunksThisSession += 1 }
+                }
+            },
+            connectionActive: { TestCentre.active(.connection) },
+            connectionLog: { [weak self] s in await MainActor.run { self?.state.append(log: s, domain: .connection) } },
+            firmwareLayout: { [weak self] v in await MainActor.run { self?.state.setStrapFirmwareLayout(v) } },
+            onPersistCircuitBreak: { [weak self] in
+                await MainActor.run {
+                    guard let self else { return }
+                    self.state.lastSyncError = String(localized: "History sync stopped: local storage failed three times in a row. Reconnect after freeing disk space or restarting the app.")
+                    self.exitBackfilling(reason: "persist circuit-breaker")
+                    if let peripheral = self.peripheral {
+                        self.central.cancelPeripheralConnection(peripheral)
+                    }
+                }
+            },
+            onOffloadComplete: { [weak self] in
+                await MainActor.run { self?.afterBackfillIngest() }
+            })
+        await actor.configure(store: store, deviceId: deviceId, hooks: hooks,
+                              enableRawCapture: enableRawCapture,
+                              postOffloadJobKinds: postOffloadJobKinds)
+        backfillActor = actor
         // Strand: no server uploader/sync — all data stays on-device.
 
         // Retro-decode: when the decoder gains a historical layout (e.g. WHOOP 4.0 v25), re-run every
@@ -2084,7 +2097,7 @@ public final class BLEManager: NSObject, ObservableObject {
         guard !id.isEmpty else { return }
         deviceId = id
         collector?.deviceId = id
-        backfiller?.deviceId = id
+        Task { await backfillActor?.setDeviceId(id) }
         // #1881: the alarm readback attributes through the router's own copy (#1706), which this used to
         // leave pointing at the previous device. Same field, same conflation, one more consumer.
         router.deviceId = id
@@ -2341,7 +2354,7 @@ public final class BLEManager: NSObject, ObservableObject {
             commandChannelReady: commandChannelReady,
             encryptedBond: state.encryptedBond,
             historyReady: state.historyReady,
-            historyInFlight: backfilling || backfillDraining || !backfillFrameQueue.isEmpty,
+            historyInFlight: backfilling,
             controlPlaneIdle: !sensorCommandLaneTaintedUntilReconnect
                 && confirmedCommandWritesOutstanding == 0,
             explicitUserInitiated: explicitUserInitiated
@@ -3072,10 +3085,13 @@ public final class BLEManager: NSObject, ObservableObject {
     /// the Backfiller; it is passed here only for logging.
     func ackHistoricalChunk(trim: UInt32, endData: [UInt8]) {
         send(.historicalDataResult, payload: [0x01] + endData, writeType: .withResponse)
-        // Progress signal for the "Syncing strap history…" UI (#77). Same main-queue delegate path as
-        // the other state mutations (e.g. lastSyncedAt in exitBackfilling). NOT historicalAckLogCounter
-        // — that's a puffin-write log throttle that never increments on WHOOP 4.
-        state.syncChunksThisSession += 1
+        // Progress signal for the "Syncing strap history…" UI (#77). Republish every 10th chunk only —
+        // @Published syncChunksThisSession drives SwiftUI across many screens. The internal counter stays
+        // exact; exitBackfilling flushes the final value. Twin of Android WhoopBleClient.ackHistoricalChunk.
+        ackedChunksThisSession += 1
+        if ackedChunksThisSession % 10 == 0 {
+            state.syncChunksThisSession = ackedChunksThisSession
+        }
     }
 
     // MARK: Backfill helpers
@@ -3110,7 +3126,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 let ref = ClockRef(device: newest, wall: wall)
                 clockRef = ref
                 collector?.clockRef = ref
-                backfiller?.clockRef = ref
+                Task { await self.backfillActor?.setClockRef(ref) }
                 log("Clock: GET_CLOCK unresponsive — derived rough correlation from Data Range (device=\(newest) wall=\(wall), offset \(wall - newest)s)")
             }
         }
@@ -3120,7 +3136,7 @@ public final class BLEManager: NSObject, ObservableObject {
             log("Backfill: deferred — connect handshake not done yet")
             return false
         }
-        guard let backfiller else {
+        guard backfillActor != nil else {
             // Store not built yet (bootstrapStore failed or hasn't run). Do NOT force live HR — the
             // type-47 backfill is the metric source. RE-ATTEMPT the bootstrap here so a transient
             // first-open failure self-heals: on iOS the data-protected store is unreadable while the
@@ -3137,11 +3153,13 @@ public final class BLEManager: NSObject, ObservableObject {
         // #42/#364: consecutiveAutoContinues > 0 means this offload is re-kicked after an EARLIER session in
         // the same burst banked rows — tell the backfiller so its no-cursor END reads as "caught up", not
         // "no banked history / charge to 100%". A fresh offload (count 0) keeps the honest guidance.
-        backfiller.begin(family: selectedModel.deviceFamily, continuedAfterRows: consecutiveAutoContinues > 0)
+        Task { await self.backfillActor?.begin(family: self.selectedModel.deviceFamily, continuedAfterRows: self.consecutiveAutoContinues > 0) }
         backfilling = true
         state.backfilling = true
         state.postOffloadBurstInProgress = true
         state.syncChunksThisSession = 0
+        ackedChunksThisSession = 0
+        lastBackfillTimeoutArm = nil
         state.rejectedFramesThisSession = 0
         state.rejectedFramesUnarchived = 0
         state.decodedChunksThisSession = 0
@@ -3159,42 +3177,15 @@ public final class BLEManager: NSObject, ObservableObject {
         return true
     }
 
-    /// Feed a frame to the Backfiller preserving exact arrival order. Frames are appended
-    /// synchronously (delegate order) and drained sequentially in small slices, so START /
-    /// data / END chunk assembly is never reordered while the UI still gets time to paint.
+    /// Feed a frame to the Backfiller preserving exact arrival order. Frames append synchronously
+    /// in delegate order; `BackfillActor` drains them sequentially off the main actor.
     private func routeBackfillFrame(_ frame: [UInt8]) {
-        backfillFrameQueue.append(frame)
-        guard !backfillDraining else { return }
-        backfillDraining = true
-        Task { @MainActor in await drainBackfillFrames() }
+        Task { await self.backfillActor?.enqueue(frame) }
     }
 
-    private func drainBackfillFrames() async {
-        while !backfillFrameQueue.isEmpty {
-            let count = min(Self.backfillDrainBatchSize, backfillFrameQueue.count)
-            let batch = Array(backfillFrameQueue.prefix(count))
-            backfillFrameQueue.removeFirst(count)
-
-            for f in batch {
-                await backfiller?.ingest(f)
-                afterBackfillIngest()
-                if !backfilling {
-                    backfillFrameQueue.removeAll(keepingCapacity: true)
-                    break
-                }
-            }
-
-            if !backfillFrameQueue.isEmpty {
-                await Task.yield()
-            }
-        }
-        backfillDraining = false
-    }
-
-    /// Called after every Backfiller.ingest completes. If the Backfiller has consumed all
-    /// historical data (isBackfilling drops to false), exit the backfill session cleanly.
+    /// Called when a backfill session completes (HISTORY_COMPLETE). Exits the backfill session cleanly.
     private func afterBackfillIngest() {
-        guard backfilling, backfiller?.isBackfilling == false else { return }
+        guard backfilling else { return }
         exitBackfilling(reason: "HISTORY_COMPLETE")
     }
 
@@ -3223,10 +3214,13 @@ public final class BLEManager: NSObject, ObservableObject {
     /// — a short watchdog cut sessions short mid-drain. Longer = more records drained per session.
     static let backfillIdleTimeoutSeconds = 60
     private func armBackfillTimeout() {
+        let now = ContinuousClock.Instant.now
+        if let last = lastBackfillTimeoutArm, now - last < .seconds(1) { return }
+        lastBackfillTimeoutArm = now
         backfillTimeout?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.backfiller?.timeoutFired()
+            Task { await self.backfillActor?.timeoutFired() }
             self.exitBackfilling(reason: "timeout")
         }
         backfillTimeout = item
@@ -3282,6 +3276,12 @@ public final class BLEManager: NSObject, ObservableObject {
 
     private func exitBackfilling(reason: String) {
         guard backfilling else { return }
+        Task { @MainActor in await self.performExitBackfilling(reason: reason) }
+    }
+
+    @MainActor
+    private func performExitBackfilling(reason: String) async {
+        guard backfilling else { return }
         backfilling = false
         state.backfilling = false
         // #174: a backfill just ended. Start (or extend) the deep-packet cooldown from this instant so
@@ -3290,7 +3290,11 @@ public final class BLEManager: NSObject, ObservableObject {
         lastOffloadFrameAt = Date()
         backfillTimeout?.cancel()
         backfillTimeout = nil
-        backfillFrameQueue.removeAll()
+        lastBackfillTimeoutArm = nil
+        if ackedChunksThisSession > 0 {
+            state.syncChunksThisSession = ackedChunksThisSession
+        }
+        let snapshot = await backfillActor?.sessionSnapshot()
         log("Backfill: session ended — reason=\(reason)")
         // Inactivity reminder (#419): read-only hook on the natural offload completion (no cadence
         // change). Only on a true HISTORY_COMPLETE — a timeout/disconnect didn't bring a fresh window.
@@ -3298,12 +3302,12 @@ public final class BLEManager: NSObject, ObservableObject {
         // Success-side summary (#150 forensics): we logged failures (decoded-to-0) but never successes,
         // so a strap log couldn't tell a banking strap from a broken one. Emit the per-session persistence
         // tally whenever anything actually landed — the win-rate signal a log previously lacked.
-        if let bf = backfiller,
+        if let bf = snapshot,
            let summary = Backfiller.sessionSummaryLine(rows: bf.sessionRowsPersisted, motion: bf.sessionMotionRows, skinTemp: bf.sessionSkinTempRows, nights: bf.sessionNights) {
             log(summary)
             // #1008/#1118: the pre-storage R-R census for this offload. Emitted next to the persisted
             // tally so one line pair says what the decoder OFFERED and what the store KEPT.
-            if let rrLine = bf.sessionRrEmissionLine() { log(rrLine) }
+            if let rrLine = bf.rrEmissionLine { log(rrLine) }
             // #67: WHERE the rows landed + WHY (the clock ref that decoded them). A reset-RTC strap banks
             // last night into the past; this line makes the misdating self-evident in the strap log instead
             // of leaving "persisted N rows across 1 night(s)" looking like a clean sync.
@@ -3318,7 +3322,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // #520: the motion-magnitude diagnostic for this session. Emitted independently of the summary
         // above — a caught-up session banks no rows but can still have decoded records — and silent when
         // nothing carried the field, which a WHOOP 4.0 never does.
-        if let bf = backfiller,
+        if let bf = snapshot,
            let dynLine = bf.sessionDynAccel.logLine(threshold: dynAccelStillThresholdG) {
             log(dynLine)
         }
@@ -3327,7 +3331,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // the same per-session tallies the existing summary above does, changing no offload behaviour. A
         // timeout/idle-cap exit is a STALL; a HISTORY_COMPLETE with rows is a clean complete; with none it
         // is an empty (console-only) cycle.
-        if TestCentre.active(.connection), let bf = backfiller {
+        if TestCentre.active(.connection), let bf = snapshot {
             let rows = bf.sessionRowsPersisted
             let result: String
             if reason == "timeout" {
@@ -3345,18 +3349,21 @@ public final class BLEManager: NSObject, ObservableObject {
                 result = "\(reason) rows=\(rows)"
             }
             state.append(log: "offload result=\(result)", domain: .connection)
+            if let phaseLine = Backfiller.sessionPhaseTimingSummaryLine(bf.phaseSamples) {
+                state.append(log: phaseLine, domain: .connection)
+            }
         }
         // #547 RE-POLLUTION: this session's ingest gate dropped bad-clock records, so the strap has a
         // wandering clock and may have banked similar garbage on an OLDER build whose gate was weaker. Arm
         // a heal re-run so the next analyze tick purges any such pollution — not gated behind the one-shot
         // done flag. Pure UserDefaults set (no engine handle here); IntelligenceEngine honours it next tick.
-        if (backfiller?.sessionDroppedImplausible ?? 0) > 0 {
+        if (snapshot?.sessionDroppedImplausible ?? 0) > 0 {
             IntelligenceEngine.requestTimestampReheal()
         }
         // #364 auto-continue spin-detector: did THIS session move the strap's trim cursor? Compare the
         // Backfiller's current high-water trim against where it stood when the previous session ended.
         // A frozen cursor (console-only / strap refusing to trim) ⇒ don't re-kick (it would spin forever).
-        let currentTrim = backfiller?.lastAckedTrim
+        let currentTrim = snapshot?.lastAckedTrim
         let trimAdvanced = currentTrim != nil && currentTrim != lastSessionEndTrim
         lastSessionEndTrim = currentTrim
         // #324/#928: a strap whose newest banked record is dated in the FUTURE (RTC relatched ahead) is
@@ -3382,7 +3389,12 @@ public final class BLEManager: NSObject, ObservableObject {
         // sensor row landed) at function scope, so the auto-continue decision below gates on this snapshot —
         // never a fresh `backfiller.sessionRowsPersisted` re-read that a re-kicked session / trailing frames
         // could have mutated across the offload boundary.
-        let persistedSensorRows = (backfiller?.sessionRowsPersisted ?? 0) > 0
+        let persistedSensorRows = (snapshot?.sessionRowsPersisted ?? 0) > 0
+        let retrySilentOffload = silentOffloadRecovery.consumeRetry(
+            timedOut: reason == "timeout", connected: state.connected && state.bonded,
+            ackedChunks: ackedChunksThisSession, persistedRows: persistedSensorRows,
+            persistStalled: snapshot?.persistStalled ?? true,
+            clockUntrusted: futureClockBanner != nil)
         let successfulDataExit = BacklogBurstDrainPolicy.committedDataExit(
             historyComplete: reason == "HISTORY_COMPLETE",
             timedOut: reason == "timeout",
@@ -3402,7 +3414,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 archivedFrames: archived,
                 unarchivedFrames: unarchived,
                 consoleChunks: state.consoleChunksThisSession,
-                rowsPersisted: backfiller?.sessionRowsPersisted ?? 0)
+                rowsPersisted: snapshot?.sessionRowsPersisted ?? 0)
             let bankedSensorRecords = banking.bankedSensorRecords
             // #42: the empty tail of an auto-continue burst (consecutiveAutoContinues > 0) isn't a "banked
             // nothing" sync — an EARLIER session in the same burst handed over real rows and this pass just
@@ -3433,11 +3445,11 @@ public final class BLEManager: NSObject, ObservableObject {
             // per-device, it would freeze it at whatever it held before the upgrade and then read "no rows
             // ever persisted" forever, for everyone. A stale global is the smaller lie than a dead one, and
             // every reader that CAN attribute prefers the per-device key.
-            if (backfiller?.sessionRowsPersisted ?? 0) > 0 {
+            if (snapshot?.sessionRowsPersisted ?? 0) > 0 {
                 du.set(Date().timeIntervalSince1970, forKey: "sync.lastWriteOkAt")
                 if let k = whoOk { du.set(Date().timeIntervalSince1970, forKey: k) }
             }
-            if backfiller?.persistStalled == true {
+            if snapshot?.persistStalled == true {
                 du.set(Date().timeIntervalSince1970, forKey: "sync.lastWriteStalledAt")
                 if let k = whoStalled { du.set(Date().timeIntervalSince1970, forKey: k) }
             }
@@ -3521,7 +3533,7 @@ public final class BLEManager: NSObject, ObservableObject {
             // (chunks acked, rows persisted, or deep packets seen); an empty 5/MG offload has none.
             let bankedThisOffload = BLEManager.offloadBankedAnything(
                 chunks: state.syncChunksThisSession,
-                rows: backfiller?.sessionRowsPersisted ?? 0,
+                rows: snapshot?.sessionRowsPersisted ?? 0,
                 deepPackets: state.deepPacketsThisSession)
             if selectedModel.deviceFamily == .whoop5 {
                 let crossed = whoop5EmptyOffload.recordOffload(bankedRecords: bankedThisOffload)
@@ -3575,6 +3587,12 @@ public final class BLEManager: NSObject, ObservableObject {
             maybeAutoContinueBackfill(trimAdvanced: trimAdvanced,
                                       persistedSensorRows: persistedSensorRows,
                                       successfulDataExit: successfulDataExit)
+            if retrySilentOffload {
+                // Reuse the normal event floor (90s from request), including its delayed
+                // retry. No abort/reset/trim command, and no invented acknowledgement.
+                log("Backfill: silent request — retrying once at the event floor; another empty timeout backs off")
+                requestSync(.connect)
+            }
         } else {
             // User abort is terminal too. It never changes lastSyncedAt, but rows from this or an earlier
             // auto-continued slice are already durable and must not leave the burst gate latched forever.
@@ -5262,6 +5280,13 @@ public final class BLEManager: NSObject, ObservableObject {
                                        emptyStreak: max(emptySyncTracker.consecutiveEmptySyncs, consecutiveEmptyOffloads),
                                        clockUntrusted: clockUntrusted) else {
             log("Backfill: \(trigger) skipped (rate-limited; last \(last.map { Int(now - $0) } ?? -1)s ago)")
+            if let delay = BackfillPolicy.eventRetryDelay(trigger: trigger, now: now,
+                                                           lastBackfillAt: last) {
+                log("Backfill: \(trigger) retry scheduled in \(Int(delay.rounded()))s after event floor")
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.requestSync(trigger)
+                }
+            }
             return
         }
         if beginBackfill() {
@@ -6540,6 +6565,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         }
         state.historyPendingSync = false   // #1164: a stale "pending" must not outlive the link
         state.syncChunksThisSession = 0
+        ackedChunksThisSession = 0
         // A mid-sync disconnect bypasses exitBackfilling, so clear the reject counters here too —
         // otherwise a stale non-zero count survives until the next beginBackfill. (#77/#91)
         state.rejectedFramesThisSession = 0
@@ -6561,8 +6587,6 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         state.sustainedEmptyOffload = false
         backfillTimeout?.cancel()
         backfillTimeout = nil
-        backfillFrameQueue.removeAll()
-        backfillDraining = false
         uploadTimer?.cancel()
         uploadTimer = nil
         backfillTimer?.cancel()
@@ -7383,7 +7407,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // #547 SESSION-RELATIVE gate: publish the strap's banked-record window to the Backfiller so the
             // historical ingest gate can reject a record dated months outside THIS strap's own [oldest,
             // newest]. The gate ignores a half/malformed window, so setting newest before oldest is safe.
-            if feedsSync { backfiller?.sessionNewestUnix = newest }
+            if feedsSync { Task { await self.backfillActor?.setSessionNewestUnix(newest) } }
             // Observability for "last night didn't sync" (#364): print the NEWEST record the strap holds.
             let d = ISO8601DateFormatter()
             d.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime, .withSpaceBetweenDateAndTime]
@@ -7391,7 +7415,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // Also surface the OLDEST banked record so one connect shows the full backlog SPAN (#364).
             let oldest = BLEManager.dataRangeOldestUnix(from: frame)
             if let oldest, oldest < newest {
-                if feedsSync { backfiller?.sessionOldestUnix = oldest }   // #547: closes the session-relative window
+                if feedsSync { Task { await self.backfillActor?.setSessionOldestUnix(oldest) } }   // #547: closes the session-relative window
                 let spanDays = (newest - oldest) / 86_400
                 log("Strap banked history span: \(d.string(from: Date(timeIntervalSince1970: TimeInterval(oldest)))) → newest (~\(spanDays) day\(spanDays == 1 ? "" : "s") of backlog, drained oldest-first)")
             }
@@ -7577,7 +7601,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                     if let ref = ClockCorrelation.clockRef(from: parsed, wall: Int(Date().timeIntervalSince1970)) {
                         clockRef = ref
                         collector?.clockRef = ref                  // unblocks buffered persistence
-                        backfiller?.clockRef = ref                 // unblocks historical chunk decode
+                        Task { await self.backfillActor?.setClockRef(ref) }                 // unblocks historical chunk decode
                         log("Clock correlated: device=\(ref.device) wall=\(ref.wall)\(clockRetries > 0 ? " (after retry \(clockRetries))" : "")")
                         // Conditional SET_CLOCK (mirrors WHOOP): only when the strap RTC has drifted /
                         // is frozen — not blindly every connect. Offload doesn't depend on this (it uses

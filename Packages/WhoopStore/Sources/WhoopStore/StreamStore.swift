@@ -26,6 +26,30 @@ extension WhoopStore {
         if UserDefaults.standard.object(forKey: "enableBackfillRangeSkip") == nil { return true }
         return UserDefaults.standard.bool(forKey: "enableBackfillRangeSkip")
     }
+
+    /// T2-3: multi-row INSERT batch size. 100 rows × 6 columns = 600 bind parameters (SQLite default 999).
+    private static let streamInsertBatchSize = 100
+
+    /// T2-3: batched `INSERT … VALUES (…),… ON CONFLICT DO NOTHING` with per-statement `changesCount`.
+    private func insertStreamBatch(_ db: Database,
+                                   insertPrefix: String,
+                                   placeholdersPerRow: String,
+                                   conflict: String,
+                                   rows: [[DatabaseValueConvertible]]) throws -> Int {
+        guard !rows.isEmpty else { return 0 }
+        var inserted = 0
+        var offset = 0
+        while offset < rows.count {
+            let end = min(offset + Self.streamInsertBatchSize, rows.count)
+            let chunk = rows[offset..<end]
+            let values = Array(repeating: placeholdersPerRow, count: chunk.count).joined(separator: ",")
+            let sql = insertPrefix + values + " " + conflict
+            try db.execute(sql: sql, arguments: StatementArguments(chunk.flatMap { $0 }))
+            inserted += db.changesCount
+            offset = end
+        }
+        return inserted
+    }
     /// Deterministic JSON for an event payload (sorted keys so the same payload always
     /// serializes byte-identically, important for the natural-key dedupe and parity).
     static func encodePayload(_ payload: [String: ParsedValue]) throws -> String {
@@ -296,14 +320,13 @@ extension WhoopStore {
             // statement on the connection across insert() calls too. Each loop is guarded so empty
             // streams (the common live case) compile nothing.
             if !streams.hr.isEmpty, !shouldSkip("hr", timestamps: streams.hr.map(\.ts)) {
-                let stmt = try db.cachedStatement(sql: """
-                    INSERT INTO hrSample (deviceId, ts, bpm) VALUES (?, ?, ?)
-                    ON CONFLICT(deviceId, ts) DO NOTHING
-                    """)
-                for s in streams.hr {
-                    try stmt.execute(arguments: [deviceId, s.ts, s.bpm])
-                    hr += db.changesCount
-                }
+                let rowArgs = streams.hr.map { [$0.ts, $0.bpm] as [DatabaseValueConvertible] }
+                hr += try insertStreamBatch(
+                    db,
+                    insertPrefix: "INSERT INTO hrSample (deviceId, ts, bpm) VALUES ",
+                    placeholdersPerRow: "(?, ?, ?)",
+                    conflict: "ON CONFLICT(deviceId, ts) DO NOTHING",
+                    rows: rowArgs.map { [deviceId] + $0 })
                 try recordFrontier("hr", timestamps: streams.hr.map(\.ts))
             }
             if !streams.rr.isEmpty, !shouldSkip("rr", timestamps: streams.rr.map(\.ts)) {
@@ -370,53 +393,45 @@ extension WhoopStore {
                 try recordFrontier("battery", timestamps: streams.battery.map(\.ts))
             }
             if !streams.spo2.isEmpty, !shouldSkip("spo2", timestamps: streams.spo2.map(\.ts)) {
-                let stmt = try db.cachedStatement(sql: """
-                    INSERT INTO spo2Sample (deviceId, ts, red, ir) VALUES (?, ?, ?, ?)
-                    ON CONFLICT(deviceId, ts) DO NOTHING
-                    """)
-                for s in streams.spo2 {
-                    try stmt.execute(arguments: [deviceId, s.ts, s.red, s.ir])
-                    spo2 += db.changesCount
-                }
+                spo2 += try insertStreamBatch(
+                    db,
+                    insertPrefix: "INSERT INTO spo2Sample (deviceId, ts, red, ir) VALUES ",
+                    placeholdersPerRow: "(?, ?, ?, ?)",
+                    conflict: "ON CONFLICT(deviceId, ts) DO NOTHING",
+                    rows: streams.spo2.map { [deviceId, $0.ts, $0.red, $0.ir] })
                 try recordFrontier("spo2", timestamps: streams.spo2.map(\.ts))
             }
             // `aux1Raw`/`aux2Raw` (v31) are the two auxiliary thermal channels riding the same v18 record
             // as the primary reading. nil (a WHOOP 4.0, or a byte that failed the decoder's thermal gate)
             // stores SQL NULL, so an absent channel stays absent.
             if !streams.skinTemp.isEmpty, !shouldSkip("skinTemp", timestamps: streams.skinTemp.map(\.ts)) {
-                let stmt = try db.cachedStatement(sql: """
-                    INSERT INTO skinTempSample (deviceId, ts, raw, aux1Raw, aux2Raw) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(deviceId, ts) DO NOTHING
-                    """)
-                for s in streams.skinTemp {
-                    try stmt.execute(arguments: [deviceId, s.ts, s.raw, s.aux1Raw, s.aux2Raw])
-                    skin += db.changesCount
-                }
+                skin += try insertStreamBatch(
+                    db,
+                    insertPrefix: "INSERT INTO skinTempSample (deviceId, ts, raw, aux1Raw, aux2Raw) VALUES ",
+                    placeholdersPerRow: "(?, ?, ?, ?, ?)",
+                    conflict: "ON CONFLICT(deviceId, ts) DO NOTHING",
+                    rows: streams.skinTemp.map { [deviceId, $0.ts, $0.raw, $0.aux1Raw, $0.aux2Raw] })
                 try recordFrontier("skinTemp", timestamps: streams.skinTemp.map(\.ts))
             }
             if !streams.resp.isEmpty, !shouldSkip("resp", timestamps: streams.resp.map(\.ts)) {
-                let stmt = try db.cachedStatement(sql: """
-                    INSERT INTO respSample (deviceId, ts, raw) VALUES (?, ?, ?)
-                    ON CONFLICT(deviceId, ts) DO NOTHING
-                    """)
-                for s in streams.resp {
-                    try stmt.execute(arguments: [deviceId, s.ts, s.raw])
-                    resp += db.changesCount
-                }
+                resp += try insertStreamBatch(
+                    db,
+                    insertPrefix: "INSERT INTO respSample (deviceId, ts, raw) VALUES ",
+                    placeholdersPerRow: "(?, ?, ?)",
+                    conflict: "ON CONFLICT(deviceId, ts) DO NOTHING",
+                    rows: streams.resp.map { [deviceId, $0.ts, $0.raw] })
                 try recordFrontier("resp", timestamps: streams.resp.map(\.ts))
             }
             // `dynAccel` (v31) is the strap's OWN gravity-removed motion magnitude for the same second —
             // stored BESIDE the vector, never in place of it, and read by nothing. nil (a WHOOP 4.0, or an
             // f32 outside the decoder's [0, 8] g gate) stores SQL NULL.
             if !streams.gravity.isEmpty, !shouldSkip("gravity", timestamps: streams.gravity.map(\.ts)) {
-                let stmt = try db.cachedStatement(sql: """
-                    INSERT INTO gravitySample (deviceId, ts, x, y, z, dynAccel) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(deviceId, ts) DO NOTHING
-                    """)
-                for s in streams.gravity {
-                    try stmt.execute(arguments: [deviceId, s.ts, s.x, s.y, s.z, s.dynAccel])
-                    grav += db.changesCount
-                }
+                grav += try insertStreamBatch(
+                    db,
+                    insertPrefix: "INSERT INTO gravitySample (deviceId, ts, x, y, z, dynAccel) VALUES ",
+                    placeholdersPerRow: "(?, ?, ?, ?, ?, ?)",
+                    conflict: "ON CONFLICT(deviceId, ts) DO NOTHING",
+                    rows: streams.gravity.map { [deviceId, $0.ts, $0.x, $0.y, $0.z, $0.dynAccel] })
                 try recordFrontier("gravity", timestamps: streams.gravity.map(\.ts))
             }
             // WHOOP5 step counter (#78). Persist-only, the count is not surfaced in the return tuple

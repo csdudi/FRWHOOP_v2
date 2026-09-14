@@ -613,7 +613,14 @@ final class AppModel: ObservableObject {
         guard repoMoved else { return }
         live.append(log: "Read spine re-pointed to active device after registry change (#814).")
         await repo.refresh()
-        await intelligence.analyzeRecent()
+        // This also runs on a CoreBluetooth-restored launch. Scoring the full
+        // history there can outlive the short background wake and restart on
+        // every restoration, starving the offload. Keep the score owed instead.
+        await RescoreBackgroundScheduler.run(log: { [live] line in
+            live.append(log: line)
+        }) {
+            await intelligence.analyzeRecent()
+        }
     }
 
     #if os(iOS)

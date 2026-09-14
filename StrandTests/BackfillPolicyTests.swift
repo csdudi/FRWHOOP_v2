@@ -4,8 +4,45 @@ import XCTest
 /// `BackfillPolicy` rate-limiter, incl. the empty-streak backoff that stops an off-wrist / not-banking
 /// strap from being re-offloaded every event floor (#77/#120/#216). Pure value logic, no CoreBluetooth seam.
 final class BackfillPolicyTests: XCTestCase {
+
+    func testSilentTimeoutGetsOneRetryUntilRealProgress() {
+        var recovery = SilentOffloadRecovery()
+        XCTAssertTrue(recovery.consumeRetry(timedOut: true, connected: true,
+            ackedChunks: 0, persistedRows: false, persistStalled: false, clockUntrusted: false))
+        for _ in 0..<10 {
+            XCTAssertFalse(recovery.consumeRetry(timedOut: true, connected: true,
+                ackedChunks: 0, persistedRows: false, persistStalled: false, clockUntrusted: false))
+        }
+        XCTAssertFalse(recovery.consumeRetry(timedOut: true, connected: true,
+            ackedChunks: 2, persistedRows: true, persistStalled: false, clockUntrusted: false))
+        XCTAssertTrue(recovery.consumeRetry(timedOut: true, connected: true,
+            ackedChunks: 0, persistedRows: false, persistStalled: false, clockUntrusted: false))
+    }
+
+    func testSilentRecoveryDoesNotRetryCompletionStorageFailureOrUnusableLink() {
+        for c in [(false, true, 0, false, false), (true, false, 0, false, false),
+                  (true, true, 1, false, false), (true, true, 0, true, false),
+                  (true, true, 0, false, true)] {
+            var recovery = SilentOffloadRecovery()
+            XCTAssertFalse(recovery.consumeRetry(timedOut: c.0, connected: c.1,
+                ackedChunks: c.2, persistedRows: false, persistStalled: c.3, clockUntrusted: c.4))
+            XCTAssertTrue(recovery.consumeRetry(timedOut: true, connected: true,
+                ackedChunks: 0, persistedRows: false, persistStalled: false, clockUntrusted: false))
+        }
+    }
     private let fe = BackfillPolicy.eventFloorSeconds      // 90
     private let fp = BackfillPolicy.periodicFloorSeconds   // 900
+
+    func testConnectJustBeforeFloorRetriesAtFloorInsteadOfWaitingForPeriodicTimer() {
+        XCTAssertEqual(BackfillPolicy.eventRetryDelay(trigger: .connect, now: 1_000,
+                                                       lastBackfillAt: 915), 5.5)
+        XCTAssertEqual(BackfillPolicy.eventRetryDelay(trigger: .foreground, now: 1_000,
+                                                       lastBackfillAt: 915), 5.5)
+        XCTAssertNil(BackfillPolicy.eventRetryDelay(trigger: .connect, now: 1_000,
+                                                    lastBackfillAt: 910))
+        XCTAssertNil(BackfillPolicy.eventRetryDelay(trigger: .periodic, now: 1_000,
+                                                    lastBackfillAt: 915))
+    }
 
     func testFirstSyncAlwaysRuns() {
         XCTAssertTrue(BackfillPolicy.shouldRun(trigger: .periodic, now: 1000, lastBackfillAt: nil))
