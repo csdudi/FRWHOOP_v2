@@ -1,9 +1,28 @@
 import XCTest
+import Combine
 import StrandAnalytics
 @testable import Strand
 
 @MainActor
 final class LiveStateDomainTagTests: XCTestCase {
+
+    func testLogBurstKeepsEveryLineButCoalescesViewInvalidations() async {
+        let live = LiveState()
+        var invalidations = 0
+        let subscription = live.objectWillChange.sink { invalidations += 1 }
+        for i in 0..<64 { live.append(log: "chunk diagnostic \(i)") }
+        XCTAssertEqual(live.log, (0..<64).map { "chunk diagnostic \($0)" })
+        XCTAssertEqual(invalidations, 0, "Log-only changes should not rebuild the whole UI per line")
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(invalidations, 1)
+        live.append(log: "next burst")
+        live.connected = true
+        XCTAssertEqual(invalidations, 2, "Connection state must still publish immediately")
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(invalidations, 3)
+        XCTAssertEqual(live.log.last, "next burst")
+        withExtendedLifetime(subscription) {}
+    }
 
     // No domain => byte-identical to today's behaviour (no tag prefix).
     func testNilDomainLeavesLineUntagged() {

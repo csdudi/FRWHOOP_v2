@@ -10,6 +10,49 @@ import WhoopProtocol
 /// lines of any version, so the rare version always survives. These tests prove that survival.
 final class RawHistoryArchiveEvictionTests: XCTestCase {
 
+    func testHexWriterMatchesExistingRepresentationForEveryByte() {
+        let bytes = (0...255).map { UInt8($0) }
+        XCTAssertEqual(RawHistoryArchive.encodeHex(bytes), bytes.map { String(format: "%02x", $0) }.joined())
+        XCTAssertEqual(RawHistoryArchive.encodeHex([]), "")
+    }
+
+    private func referenceParse(_ line: String) -> [UInt8]? {
+        guard let hr = line.range(of: "\"frameHex\":\"") else { return nil }
+        let hex = line[hr.upperBound...].prefix { $0 != "\"" }
+        guard hex.count % 2 == 0 else { return nil }
+        var bytes = [UInt8](); var i = hex.startIndex
+        while i < hex.endIndex {
+            let j = hex.index(i, offsetBy: 2)
+            guard let b = UInt8(hex[i..<j], radix: 16) else { return nil }
+            bytes.append(b); i = j
+        }
+        return bytes
+    }
+
+    func testArchiveParserMatchesExistingFormatAndMalformedInputRules() {
+        for hex in ["", "00ff", "AaFf01", "+f", "-0", "0", "fg", "é0", "a\u{301}f", "00\"tail"] {
+            let line = "{\"family\":\"whoop5\",\"frameHex\":\"\(hex)\"}"
+            XCTAssertEqual(RawHistoryArchive.parseArchiveLine(line)?.frame, referenceParse(line), hex)
+        }
+    }
+
+    func testLargeArchiveHexParsingAvoidsPerByteStringConversion() {
+        let bytes = (0..<4096).map { UInt8($0 & 255) }
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        let line = "{\"family\":\"whoop5\",\"frameHex\":\"\(hex)\"}"
+        var observed = 0
+        let referenceStart = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<128 { observed += referenceParse(line)!.count }
+        let referenceSeconds = ProcessInfo.processInfo.systemUptime - referenceStart
+        let fastStart = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<128 { observed += RawHistoryArchive.parseArchiveLine(line)!.frame.count }
+        let fastSeconds = ProcessInfo.processInfo.systemUptime - fastStart
+        XCTAssertEqual(observed, 2 * 128 * bytes.count)
+        XCTAssertEqual(RawHistoryArchive.parseArchiveLine(line)!.frame, bytes)
+        print("archive parse reference=\(referenceSeconds)s current=\(fastSeconds)s")
+        XCTAssertLessThan(fastSeconds, referenceSeconds * 0.5)
+    }
+
     private func tmpDir(_ tag: String) -> URL {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("noop-evict-\(tag)-\(UUID().uuidString)", isDirectory: true)

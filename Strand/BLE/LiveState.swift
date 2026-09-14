@@ -391,7 +391,23 @@ public final class LiveState: ObservableObject {
         return String(watts)
     }
     /// Rolling log of human-readable lines for the on-device verification checklist.
-    @Published public var log: [String] = []
+    /// Entries remain immediately readable/exportable. Coalesce only view invalidation:
+    /// one historical chunk can append many lines, each of which used to rebuild every
+    /// screen observing this large state object before the next BLE acknowledgement.
+    public var log: [String] = [] {
+        didSet { scheduleLogInvalidation() }
+    }
+    private var logInvalidationScheduled = false
+
+    private func scheduleLogInvalidation() {
+        guard !logInvalidationScheduled else { return }
+        logInvalidationScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self else { return }
+            self.logInvalidationScheduled = false
+            self.objectWillChange.send()
+        }
+    }
 
     // MARK: - Connection status (single source of truth, #266)
 
