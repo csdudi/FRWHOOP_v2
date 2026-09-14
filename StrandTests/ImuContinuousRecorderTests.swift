@@ -1,5 +1,6 @@
 import XCTest
 @testable import Strand
+import WhoopProtocol
 
 /// State-machine tests for the Developer Options "Record 100 Hz IMU locally" producer owner.
 /// Every test drives the recorder through its injected transport/clock seams — no CoreBluetooth,
@@ -56,14 +57,35 @@ final class ImuContinuousRecorderTests: XCTestCase {
         return recorder
     }
 
-    /// A valid 1244-byte 5/MG IMU buffer: u32 LE strap ts @15, sample counts 100 @24/@630.
+    /// CRC-valid 1244-byte 5/MG IMU buffer: u32 LE strap ts @15, sample counts 100 @24/@630.
     /// `seed` varies the accel payload so same-ts frames can differ (conflict detection).
     private func imuFrame(ts: Int64, seed: UInt8 = 0) -> [UInt8] {
-        var frame = [UInt8](repeating: 0, count: 1244)
+        var frame = [UInt8](repeating: 0, count: Whoop5RawImu.bufferLength)
+        frame[0] = 0xAA
+        frame[1] = 0x01
+        let declaredLength = frame.count - 8
+        frame[2] = UInt8(declaredLength & 0xFF)
+        frame[3] = UInt8((declaredLength >> 8) & 0xFF)
+        frame[4] = 0x01
+        frame[8] = 43
         frame[15] = UInt8(ts & 0xff); frame[16] = UInt8((ts >> 8) & 0xff)
         frame[17] = UInt8((ts >> 16) & 0xff); frame[18] = UInt8((ts >> 24) & 0xff)
         frame[24] = 100; frame[630] = 100
         if seed != 0 { frame[28] = seed }
+        return stampWhoop5Crc(frame)
+    }
+
+    private func stampWhoop5Crc(_ frame: [UInt8]) -> [UInt8] {
+        var frame = frame
+        let headerCRC = crc16Modbus(frame, 0, 6)
+        frame[6] = UInt8(headerCRC & 0xFF)
+        frame[7] = UInt8(headerCRC >> 8)
+        let payloadEnd = frame.count - 4
+        let payloadCRC = crc32(frame, 8, payloadEnd)
+        frame[payloadEnd] = UInt8(payloadCRC & 0xFF)
+        frame[payloadEnd + 1] = UInt8((payloadCRC >> 8) & 0xFF)
+        frame[payloadEnd + 2] = UInt8((payloadCRC >> 16) & 0xFF)
+        frame[payloadEnd + 3] = UInt8((payloadCRC >> 24) & 0xFF)
         return frame
     }
 
@@ -71,12 +93,13 @@ final class ImuContinuousRecorderTests: XCTestCase {
     private func noisyFrame(ts: Int64) -> [UInt8] {
         var frame = imuFrame(ts: ts)
         var state = UInt64(bitPattern: ts) &* 2_862_933_555_777_941_757 &+ 1
-        for index in 28..<1244 {
+        for index in 28..<(frame.count - 4) {
+            if index == 630 || index == 631 { continue }
             state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
             frame[index] = UInt8(truncatingIfNeeded: state >> 33)
         }
         frame[630] = 100; frame[631] = 0   // keep the gyro sample-count gate valid
-        return frame
+        return stampWhoop5Crc(frame)
     }
 
     private func advance(seconds: Int64) { harness.nowMs += seconds * 1_000 }

@@ -25,12 +25,35 @@ final class ImuSessionFileStoreTests: XCTestCase {
         super.tearDown()
     }
 
+    /// CRC-valid 1244-byte 5/MG IMU buffer. The verified decoder rejects envelope/CRC failures,
+    /// so fixtures must match the on-wire contract rather than only sample-count offsets.
     private func imuFrame(ts: Int64, seed: UInt8 = 0) -> [UInt8] {
-        var frame = [UInt8](repeating: 0, count: 1244)
+        var frame = [UInt8](repeating: 0, count: Whoop5RawImu.bufferLength)
+        frame[0] = 0xAA
+        frame[1] = 0x01
+        let declaredLength = frame.count - 8
+        frame[2] = UInt8(declaredLength & 0xFF)
+        frame[3] = UInt8((declaredLength >> 8) & 0xFF)
+        frame[4] = 0x01
+        frame[8] = 43
         frame[15] = UInt8(ts & 0xff); frame[16] = UInt8((ts >> 8) & 0xff)
         frame[17] = UInt8((ts >> 16) & 0xff); frame[18] = UInt8((ts >> 24) & 0xff)
         frame[24] = 100; frame[630] = 100
         if seed != 0 { frame[28] = seed }
+        return stampWhoop5Crc(frame)
+    }
+
+    private func stampWhoop5Crc(_ frame: [UInt8]) -> [UInt8] {
+        var frame = frame
+        let headerCRC = crc16Modbus(frame, 0, 6)
+        frame[6] = UInt8(headerCRC & 0xFF)
+        frame[7] = UInt8(headerCRC >> 8)
+        let payloadEnd = frame.count - 4
+        let payloadCRC = crc32(frame, 8, payloadEnd)
+        frame[payloadEnd] = UInt8(payloadCRC & 0xFF)
+        frame[payloadEnd + 1] = UInt8((payloadCRC >> 8) & 0xFF)
+        frame[payloadEnd + 2] = UInt8((payloadCRC >> 16) & 0xFF)
+        frame[payloadEnd + 3] = UInt8((payloadCRC >> 24) & 0xFF)
         return frame
     }
 
