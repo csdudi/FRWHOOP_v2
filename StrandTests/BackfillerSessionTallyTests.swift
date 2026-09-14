@@ -375,4 +375,25 @@ final class BackfillerSessionTallyTests: XCTestCase {
         XCTAssertFalse(line.contains("should start banking again"), line)
         XCTAssertFalse(line.contains("\u{2014}"))
     }
+
+    func testPhaseTimingPercentile() {
+        XCTAssertEqual(Backfiller.percentileMs([10, 20, 30, 40, 100], percentile: 50), 30)
+        XCTAssertEqual(Backfiller.percentileMs([10, 20, 30, 40, 100], percentile: 99), 100)
+        XCTAssertNil(Backfiller.percentileMs([], percentile: 50))
+    }
+
+    func testPhaseTimingSummaryLineNamesPhases() {
+        let samples = [
+            BackfillChunkPhaseSample(frameCount: 50, gapMs: 100, decodeMs: 10, insertMs: 20,
+                                     rawMs: 0, imuMs: 5, ackMs: 2),
+            BackfillChunkPhaseSample(frameCount: 48, gapMs: 120, decodeMs: 12, insertMs: 18,
+                                     rawMs: 0, imuMs: 0, ackMs: 3),
+        ]
+        let line = Backfiller.sessionPhaseTimingSummaryLine(samples)
+        XCTAssertNotNil(line)
+        XCTAssertTrue(line!.contains("insertAndMarkJobsOwed"), line ?? "")
+        XCTAssertTrue(line!.contains("enqueueRawBatch"), line ?? "")
+        XCTAssertTrue(line!.contains("persistHistoricalImu"), line ?? "")
+        XCTAssertTrue(line!.contains("inter-chunk gap"), line ?? "")
+    }
 }

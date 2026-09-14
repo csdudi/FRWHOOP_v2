@@ -3345,6 +3345,9 @@ public final class BLEManager: NSObject, ObservableObject {
                 result = "\(reason) rows=\(rows)"
             }
             state.append(log: "offload result=\(result)", domain: .connection)
+            if let phaseLine = Backfiller.sessionPhaseTimingSummaryLine(bf.sessionPhaseTimingSamples()) {
+                state.append(log: phaseLine, domain: .connection)
+            }
         }
         // #547 RE-POLLUTION: this session's ingest gate dropped bad-clock records, so the strap has a
         // wandering clock and may have banked similar garbage on an OLDER build whose gate was weaker. Arm

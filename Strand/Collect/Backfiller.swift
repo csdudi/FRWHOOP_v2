@@ -45,6 +45,19 @@ extension BackfillStoreWriting {
 
 extension WhoopStore: BackfillStoreWriting {}
 
+// MARK: - Offload chunk phase timing (T2-0)
+
+/// One HISTORY_END commit sample. Phases are measured inside `Backfiller.finishChunk` only.
+struct BackfillChunkPhaseSample: Sendable {
+    let frameCount: Int
+    let gapMs: Int?
+    let decodeMs: Int
+    let insertMs: Int
+    let rawMs: Int
+    let imuMs: Int
+    let ackMs: Int
+}
+
 // MARK: - Backfiller
 
 /// Historical-offload state machine (idle / backfilling).
@@ -214,6 +227,12 @@ final class Backfiller {
     /// `Spo2ReTrace.maxSamples`. Session-scoped so the cap spans chunks; reset per session in `begin`.
     private var spo2Dumped = 0
 
+    /// T2-0: per-chunk wall-clock samples for offload latency forensics. Each sample covers ONE
+    /// `finishChunk` invocation (one HISTORY_END). Phases are measured on the Backfiller actor only —
+    /// they do NOT include BLE delegate queue wait or main-actor drain/yield overhead.
+    private var chunkPhaseSamples: [BackfillChunkPhaseSample] = []
+    private var lastChunkArrival: ContinuousClock.Instant?
+
     /// Durably archives undecodable record frames BEFORE the trim ack (#77 / #91). Returns true once
     /// the bytes are safe (written OR cap-reached — either way the chunk may be acked) and false on a
     /// genuine write failure, in which case `finishChunk` holds the cursor/ack so the strap re-sends.
@@ -324,6 +343,8 @@ final class Backfiller {
         sessionDynAccel = Streams.DynAccelDiag()
         loggedLayoutVersions.removeAll(keepingCapacity: true)
         spo2Dumped = 0
+        chunkPhaseSamples.removeAll(keepingCapacity: true)
+        lastChunkArrival = nil
         // #547: the range markers belong to a connection's GET_DATA_RANGE, which BLEManager re-sets per
         // connect; clear them here so a fresh session never reuses a previous strap's window. BLEManager
         // re-publishes them as soon as the range reply arrives.
@@ -382,6 +403,55 @@ final class Backfiller {
         guard rows > 0 else { return nil }
         return "Backfill: session persisted \(rows) rows (\(motion) with motion, \(skinTemp) skin-temp) across \(nights) night(s)."
     }
+
+    /// T2-0: one session-level offload latency summary. Each phase names exactly what was timed; nil when
+    /// no HISTORY_END arrived this session. Percentiles are over per-chunk samples (p50/p99).
+    nonisolated static func sessionPhaseTimingSummaryLine(_ samples: [BackfillChunkPhaseSample]) -> String? {
+        guard !samples.isEmpty else { return nil }
+        func p(_ values: [Int], _ pct: Int) -> Int {
+            percentileMs(values, percentile: pct) ?? 0
+        }
+        let decode = samples.map(\.decodeMs)
+        let insert = samples.map(\.insertMs)
+        let raw = samples.map(\.rawMs)
+        let imu = samples.map(\.imuMs)
+        let ack = samples.map(\.ackMs)
+        let frames = samples.map(\.frameCount)
+        let gaps = samples.compactMap(\.gapMs)
+        var line = "Backfill: chunk phase timing n=\(samples.count) chunks"
+        line += " decode p50/p99=\(p(decode, 50))/\(p(decode, 99))ms"
+        line += " (parseFrame+extractHistoricalStreams+reject scan, Task.detached)"
+        line += " insert p50/p99=\(p(insert, 50))/\(p(insert, 99))ms (store.insertAndMarkJobsOwed)"
+        line += " raw p50/p99=\(p(raw, 50))/\(p(raw, 99))ms (enqueueRawBatch when enabled, else 0)"
+        line += " imu p50/p99=\(p(imu, 50))/\(p(imu, 99))ms (persistHistoricalImu flush when routed)"
+        line += " ack p50/p99=\(p(ack, 50))/\(p(ack, 99))ms (setCursor strap_trim + ackTrim callback)"
+        line += " frames/chunk p50/p99=\(p(frames, 50))/\(p(frames, 99))"
+        if !gaps.isEmpty {
+            line += " inter-chunk gap p50/p99=\(p(gaps, 50))/\(p(gaps, 99))ms (wall between HISTORY_END arrivals)"
+        }
+        return line
+    }
+
+    /// T2-0: per-chunk detail for Connection test mode. Diagnostic only — never attributes BLE/main-actor wait.
+    nonisolated static func chunkPhaseDetailLine(trim: UInt32, sample: BackfillChunkPhaseSample) -> String {
+        var line = "offload chunk trim=\(trim) frames=\(sample.frameCount)"
+        if let gap = sample.gapMs { line += " gapMs=\(gap)" }
+        line += " decodeMs=\(sample.decodeMs) insertMs=\(sample.insertMs)"
+        line += " rawMs=\(sample.rawMs) imuMs=\(sample.imuMs) ackMs=\(sample.ackMs)"
+        return line
+    }
+
+    /// T2-0: percentile over integer millisecond samples. Pure for unit tests.
+    nonisolated static func percentileMs(_ values: [Int], percentile: Int) -> Int? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let rank = (percentile * sorted.count + 99) / 100
+        let index = min(sorted.count - 1, max(0, rank - 1))
+        return sorted[index]
+    }
+
+    /// Session phase samples for the Connection test-mode summary at offload end.
+    func sessionPhaseTimingSamples() -> [BackfillChunkPhaseSample] { chunkPhaseSamples }
 
     /// #1008/#1118: the session's PRE-STORAGE R-R census. `ratio` is beat-time per second of wall time
     /// over the whole session — above 1.0 is physically impossible, and because it is measured on what the
@@ -543,6 +613,11 @@ final class Backfiller {
     private func finishChunk(unix: UInt32, trim: UInt32, endFrame: [UInt8]) async {
         guard let endData = Backfiller.endData(from: endFrame, family: family) else { return }
 
+        let chunkArrival = ContinuousClock.Instant.now
+        let gapMs = lastChunkArrival.map { Int(chunkArrival - $0) / 1_000_000 }
+        lastChunkArrival = chunkArrival
+        var decodeMs = 0, insertMs = 0, rawMs = 0, imuMs = 0, ackMs = 0
+
         // #773: corrupt future-RTC detection. A HISTORY_END carries the strap's own clock; a genuine offload
         // is always PAST-dated (it's banked history), so an end dated days into the future can only be a
         // corrupt strap RTC. Surface it ONCE per session with a recovery hint so the cause (the strap clock,
@@ -558,7 +633,16 @@ final class Backfiller {
         }
 
         let frames = chunk
+        let frameCount = frames.count
         chunk.removeAll(keepingCapacity: true)   // next records accumulate into the next chunk
+
+        func recordPhaseSample() {
+            let sample = BackfillChunkPhaseSample(frameCount: frameCount, gapMs: gapMs,
+                                          decodeMs: decodeMs, insertMs: insertMs,
+                                          rawMs: rawMs, imuMs: imuMs, ackMs: ackMs)
+            chunkPhaseSamples.append(sample)
+            emitConnection(Backfiller.chunkPhaseDetailLine(trim: trim, sample: sample))
+        }
 
         if !frames.isEmpty {
             // type-47 HISTORICAL_DATA carries its OWN real-unix timestamp — extractHistoricalStreams
@@ -584,12 +668,14 @@ final class Backfiller {
             let dev = ref.device, wall = ref.wall
             let oldest = sessionOldestUnix, newest = sessionNewestUnix
             let extractFn = extract   // keep the injected Extractor seam (tests override it); prod == extractHistoricalStreams
+            let decodeStart = ContinuousClock.Instant.now
             let d = await Task.detached(priority: .utility) { () -> DecodedChunk in
                 let parsed = frames.map { parseFrame($0, family: fam) }
                 let decoded = extractFn(parsed, dev, wall, oldest, newest)
                 let rejected = rejectedHistoricalRecords(frames, family: fam)
                 return DecodedChunk(parsed: parsed, decoded: decoded, rejected: rejected)
             }.value
+            decodeMs = Int(ContinuousClock.Instant.now - decodeStart) / 1_000_000
             let parsed = d.parsed
             // #1008: per-chunk clock basis + R-R packing. The session summary logs only the FIRST chunk's
             // correlation, which cannot show the offset moving across a long offload nor separate "the same
@@ -754,6 +840,7 @@ final class Backfiller {
             // emission can be measured, since every existing R-R number is taken after the ON CONFLICT key
             // has already absorbed part of it.
             let rrCensus = RrEmissionStats.compute(decoded.rr.map { (ts: $0.ts, rrMs: $0.rrMs) })
+            let insertStart = ContinuousClock.Instant.now
             do {
                 // The durable debt is part of the SAME transaction as the decoded rows (safe trim): if the
                 // job upsert fails, the insert rolls back too and this chunk stays on the strap for replay.
@@ -764,13 +851,16 @@ final class Backfiller {
                     note: "historical rows committed before trim=\(trim)")
                 counts = outcome.counts
             } catch {
+                insertMs = Int(ContinuousClock.Instant.now - insertStart) / 1_000_000
                 // Diag (#601): the decoded rows and/or the post-offload debt couldn't be written — we
                 // return WITHOUT acking so the strap keeps this chunk and re-sends everything next
                 // session (no data loss, and the debt is re-recorded with the rows).
                 log?("Backfill: failed to persist decoded rows/debt (trim=\(trim)): \(error) — holding ack so the strap re-sends this chunk; history won't advance until the write succeeds.")
                 persistStalled = true   // #57: stall ALL further acks so an empty END can't advance past this
+                recordPhaseSample()
                 return
             }
+            insertMs = Int(ContinuousClock.Instant.now - insertStart) / 1_000_000
             onBankedOffload(counts)
             // Success-side observability (#150): tally what actually persisted so the session can emit
             // "persisted N rows (M with motion) across K night(s)" — the win-rate signal a log never had.
@@ -807,6 +897,7 @@ final class Backfiller {
                 guard rejectedSink(rejected, trim, family) else {
                     log?("Backfill: rejected-frame archive failed (trim=\(trim)) — holding ack so the strap re-sends.")
                     persistStalled = true   // #57
+                    recordPhaseSample()
                     return
                 }
             }
@@ -823,14 +914,18 @@ final class Backfiller {
                     endTs: ref.wall,
                     frameCount: frames.count,
                     byteSize: frames.reduce(0) { $0 + $1.count })
+                let rawStart = ContinuousClock.Instant.now
                 do { try await store.enqueueRawBatch(meta, frames: frames) } catch {
+                    rawMs = Int(ContinuousClock.Instant.now - rawStart) / 1_000_000
                     // Diag (#601): raw-capture is ON and the raw batch couldn't be enqueued. Hold the ack
                     // (return) so the strap re-sends — the research toggle's contract is that raw is durable
                     // before the trim advances. Surface it so a stalled offload with raw-capture on is visible.
                     log?("Backfill: failed to enqueue raw batch (trim=\(trim)): \(error) — holding ack so the strap re-sends this chunk; raw capture must be durable before the trim advances.")
                     persistStalled = true   // #57
+                    recordPhaseSample()
                     return
                 }
+                rawMs = Int(ContinuousClock.Instant.now - rawStart) / 1_000_000
             }
 
             // FRWHOOP issue #1: historical 100 Hz IMU buffers in this chunk belong to any registered
@@ -844,10 +939,16 @@ final class Backfiller {
                     guard p.ok && p.crcOK == true else { return nil }
                     return Whoop5RawImu.decodeColumns(frame)
                 }
-                if !imuRecords.isEmpty && !imuSessionSink(deviceId, imuRecords) {
-                    log?("Backfill: failed to durably persist session IMU data (trim=\(trim)) — holding ack so the strap re-sends this chunk; session .imus must be on disk before the trim advances.")
-                    persistStalled = true   // #57
-                    return
+                if !imuRecords.isEmpty {
+                    let imuStart = ContinuousClock.Instant.now
+                    let imuOk = imuSessionSink(deviceId, imuRecords)
+                    imuMs = Int(ContinuousClock.Instant.now - imuStart) / 1_000_000
+                    if !imuOk {
+                        log?("Backfill: failed to durably persist session IMU data (trim=\(trim)) — holding ack so the strap re-sends this chunk; session .imus must be on disk before the trim advances.")
+                        persistStalled = true   // #57
+                        recordPhaseSample()
+                        return
+                    }
                 }
             }
         }
@@ -878,10 +979,13 @@ final class Backfiller {
         // past the last GOOD ack. Twin of the Android guard.
         if persistStalled {
             log?("Backfill: persist stalled earlier this session — NOT acking trim=\(trim) so the strap can't trim past un-stored history. Reconnect once the store is healthy (#57).")
+            recordPhaseSample()
             return
         }
 
+        let ackStart = ContinuousClock.Instant.now
         do { try await store.setCursor("strap_trim", Int(trim)) } catch {
+            ackMs = Int(ContinuousClock.Instant.now - ackStart) / 1_000_000
             // Diag (#601): decoded (and raw, if on) are durable but the strap_trim cursor write failed. We
             // return WITHOUT acking — acking now would let the strap trim past records the cursor hasn't
             // recorded, so on reconnect the offload could replay or skip. Holding the ack keeps it safe; the
@@ -889,11 +993,14 @@ final class Backfiller {
             // suspect with nothing in the log to confirm it.
             log?("Backfill: failed to write strap_trim cursor (trim=\(trim)): \(error) — holding ack so the strap re-sends this chunk; history won't advance until the cursor write succeeds.")
             persistStalled = true   // #57
+            recordPhaseSample()
             return
         }
 
         ackTrim(trim, endData)
+        ackMs = Int(ContinuousClock.Instant.now - ackStart) / 1_000_000
         lastAckedTrim = trim   // #364: record the advanced cursor for the auto-continue spin-detector
+        recordPhaseSample()
     }
 
     /// Called when a backfill watchdog timer fires (strap went silent mid-offload).
