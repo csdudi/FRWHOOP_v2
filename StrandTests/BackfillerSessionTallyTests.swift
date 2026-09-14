@@ -391,6 +391,9 @@ final class BackfillerSessionTallyTests: XCTestCase {
         ]
         let line = Backfiller.sessionPhaseTimingSummaryLine(samples)
         XCTAssertNotNil(line)
+        XCTAssertTrue(line!.contains("total p50/p99="), line ?? "")
+        XCTAssertTrue(line!.contains("diagnostics p50/p99="), line ?? "")
+        XCTAssertTrue(line!.contains("archive p50/p99="), line ?? "")
         XCTAssertTrue(line!.contains("insertAndMarkJobsOwed"), line ?? "")
         XCTAssertTrue(line!.contains("enqueueRawBatch"), line ?? "")
         XCTAssertTrue(line!.contains("persistHistoricalImu"), line ?? "")

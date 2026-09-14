@@ -12,6 +12,24 @@ import XCTest
 /// platforms cannot redact a log differently.
 final class PiiRedactionTests: XCTestCase {
 
+    func testLongHexDiagnosticDoesNotBacktrackAcrossEveryTokenSuffix() {
+        // This runs synchronously on the main actor before the historical trim ACK.
+        // The old unanchored name regex takes >1s here; a linear scan takes a few ms.
+        let line = "Backfill: rejected frame[0] 4280B: " + String(repeating: "0", count: 8560)
+        _ = LiveState.redactPii("warm up")
+        let started = Date()
+        let result = LiveState.redactPii(line)
+        let seconds = Date().timeIntervalSince(started)
+        XCTAssertEqual(result, line)
+        XCTAssertLessThan(seconds, 0.2, "A diagnostic line must not delay the next BLE acknowledgement")
+    }
+
+    func testLongNameStillRedactsTheWholeToken() {
+        let name = String(repeating: "Zoë_", count: 1000)
+        XCTAssertEqual(LiveState.redactPii("Discovered \(name)'s WHOOP 5.0"),
+                       "Discovered <name>'s WHOOP 5.0")
+    }
+
     func testPersonalNameInDiscoveryLineIsRedacted() {
         XCTAssertEqual(
             LiveState.redactPii("Discovered Ryan's Whoop (rssi -55) - connecting"),

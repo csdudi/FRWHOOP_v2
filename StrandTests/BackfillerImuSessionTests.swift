@@ -81,6 +81,29 @@ final class BackfillerImuSessionTests: XCTestCase {
         XCTAssertTrue(store.operations.contains("cursor"))
     }
 
+    func testChunkTimingIncludesSlowDiagnosticAndArchiveCallbacksBeforeAck() async {
+        let store = SpyStore()
+        var acked = false
+        let backfiller = Backfiller(
+            store: store, deviceId: "devA",
+            ackTrim: { _, _ in acked = true },
+            log: { _ in try? await Task.sleep(nanoseconds: 20_000_000) },
+            rejectedSink: { _, _, _ in
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                return true
+            })
+        backfiller.begin(family: .whoop5)
+        await backfiller.ingest(makeValidImuFrame(unix: 1_500, seed: 1))
+        await backfiller.ingest(hexBytes(whoop5HistoryEndHex))
+        guard let sample = backfiller.sessionPhaseTimingSamples().last else {
+            return XCTFail("Missing chunk timing")
+        }
+        XCTAssertTrue(acked)
+        XCTAssertGreaterThanOrEqual(sample.diagnosticsMs, 20)
+        XCTAssertGreaterThanOrEqual(sample.archiveMs, 20)
+        XCTAssertGreaterThanOrEqual(sample.totalMs, sample.diagnosticsMs + sample.archiveMs)
+    }
+
     func testImuFlushFailureStallsAck() async {
         let store = SpyStore()
         var acked = false
