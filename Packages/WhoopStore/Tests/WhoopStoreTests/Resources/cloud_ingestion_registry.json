@@ -35,6 +35,11 @@
       "supabaseTable": "noop_battery_samples",
       "why": "Strap SOC/mV/charging telemetry from offload."
     },
+    "backfillFrontier": {
+      "platform": "ios_only",
+      "classification": "local_only",
+      "why": "Backfill duplicate-replay skip frontier (GRDB v45). Operational ingest state — never shipped; Android may adopt separately."
+    },
     "coachMessage": {
       "platform": "both",
       "classification": "shipped",
@@ -306,6 +311,16 @@
       "b2RetentionClass": "core",
       "supabaseTable": "noop_step_samples",
       "why": "WHOOP 5 step counter and activity class."
+    },
+    "syncJob": {
+      "platform": "both",
+      "classification": "local_only",
+      "why": "Durable post-offload job debt (#1538). Ephemeral scheduling state — not user data and not cloud-shipped."
+    },
+    "syncJournalEntry": {
+      "platform": "both",
+      "classification": "local_only",
+      "why": "On-device sync pipeline journal for post-offload stages. Operational telemetry — not cloud-shipped."
     },
     "v18AuxSample": {
       "platform": "both",
