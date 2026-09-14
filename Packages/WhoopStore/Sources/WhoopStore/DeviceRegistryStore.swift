@@ -146,6 +146,8 @@ public struct DeviceRegistryStore: Sendable {
         // so forgetting that source must clear them — otherwise an imported phone's hour-by-hour step
         // history survives the delete (the same privacy defect this list exists to close).
         "appleStepHour",
+        // v45-backfill-frontier: per-stream duplicate-replay skip markers for backfill ingest.
+        "backfillFrontier",
     ]
 
     /// Permanently delete every recorded sample/derived row belonging to one device, across all

@@ -940,6 +940,16 @@ extension WhoopStore {
                 t.column("note", .text)
             }
         }
+        // Backfill-only duplicate-replay skip frontier (#ingestion-cpu). Never derive from table MAX(ts)
+        // — live-collector rows share those tables and would poison it. iOS-only operational state.
+        migrator.registerMigration("v45-backfill-frontier") { db in
+            try db.create(table: "backfillFrontier", options: [.ifNotExists]) { t in
+                t.column("deviceId", .text).notNull()
+                t.column("stream", .text).notNull()
+                t.column("maxTs", .integer).notNull()
+                t.primaryKey(["deviceId", "stream"])
+            }
+        }
         return migrator
     }
 }

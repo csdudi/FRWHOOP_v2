@@ -169,7 +169,7 @@ final class ImuContinuousRecorderTests: XCTestCase {
     // MARK: - Acceptance 2 + 4: Off stops immediately, sends the hardware stop unconditionally
 
     func testOffStopsWritesAndSendsHardwareStopEvenWithRetentionEnabled() {
-        defaults.set(true, forKey: "enableRawCapture")   // fork default: raw-frame retention ON
+        defaults.set(true, forKey: "enableRawCapture")   // explicit opt-in for this retention test
         let recorder = makeRecorder()
         recorder.setEnabled(true)
         recorder.ingestFrame(imuFrame(ts: harness.nowSec), isOffload: false,

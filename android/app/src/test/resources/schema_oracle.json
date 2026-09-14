@@ -45,7 +45,8 @@
     "v41-drop-raw-imu-sample",
     "v42-daily-sleep-hr-only",
     "v43-coach-messages",
-    "v44-sync-jobs"
+    "v44-sync-jobs",
+    "v45-backfill-frontier"
   ],
   "divergenceReasons": {
     "android-orphan-synced-column": "REAL COLUMN DRIFT: `synced` exists on Android only. GRDB's v10 note is explicit that stepSample gets no `synced` column ('unused; see StreamStore'), and v12's ppgHrSample never had one either; the Room entities copied the flag from the older per-second entities. Nothing reads it on Android — the per-row upload flag belongs to an upload path that does not exist there — so it is dead width, not divergent data. Removing it needs a Room table rebuild.",
@@ -287,6 +288,35 @@
       ],
       "primaryKey": [
         "name"
+      ],
+      "indices": []
+    },
+    "backfillFrontier": {
+      "platform": "ios_only",
+      "reason": "Backfill duplicate-replay skip frontier (GRDB v45). Android may adopt separately; never derive from table MAX(ts) because live-collector rows share those tables.",
+      "columns": [
+        {
+          "name": "deviceId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "stream",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "maxTs",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        }
+      ],
+      "primaryKey": [
+        "deviceId",
+        "stream"
       ],
       "indices": []
     },
@@ -1785,7 +1815,7 @@
         {
           "name": "id",
           "affinity": "INTEGER",
-          "notNull": true,
+          "notNull": false,
           "default": null
         },
         {

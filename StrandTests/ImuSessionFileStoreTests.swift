@@ -95,4 +95,24 @@ final class ImuSessionFileStoreTests: XCTestCase {
         XCTAssertFalse(ImuSessionFileStore.continuous === ImuSessionFileStore.shared)
         XCTAssertTrue(ImuSessionFileStore.continuous.registeredWindows().isEmpty)
     }
+
+    func testCorruptedAppendedBlockRollsBackAndLeavesRecordsPending() {
+        store.register(id: "s1", deviceId: "devA", fromMs: 1_000_000, toMs: 2_000_000)
+        store.testFailAppendVerification = true
+        let ts: Int64 = 1_500
+        for index in 0..<ImuSessionFileStore.blockSeconds {
+            _ = store.append(deviceId: "devA", frame: imuFrame(ts: ts + Int64(index)), receivedAtMs: 1)
+        }
+        // Failed verification rolls back the append — nothing exportable on disk yet.
+        XCTAssertTrue(store.exportSegments("s1", from: Int(ts),
+                                          to: Int(ts + Int64(ImuSessionFileStore.blockSeconds) - 1)).isEmpty)
+        store.testFailAppendVerification = false
+        XCTAssertTrue(store.persistHistoricalImu(deviceId: "devA",
+                                                 frames: (0..<ImuSessionFileStore.blockSeconds)
+            .map { imuFrame(ts: ts + Int64($0)) },
+                                                 receivedAtMs: 2))
+        store.prepareForRead("s1")
+        let after = store.stats("s1", from: Int(ts), to: Int(ts + Int64(ImuSessionFileStore.blockSeconds) - 1))
+        XCTAssertEqual(after.coveredSeconds, ImuSessionFileStore.blockSeconds)
+    }
 }

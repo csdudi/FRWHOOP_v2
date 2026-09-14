@@ -116,6 +116,12 @@ public enum Whoop5RawImu {
     /// `decode`; nil if `f` isn't a valid IMU buffer. Scales stay documented constants applied at read
     /// time, so nothing lossy is baked into the stored bytes. Twin of Kotlin `Whoop5RawImu.rawColumns`.
     public static func rawColumns(_ f: [UInt8]) -> [Int16]? {
+        decodeColumns(f)?.columns
+    }
+
+    /// One-pass decode of the strap timestamp and raw column payload. Prefer this over separate
+    /// `baseTs` + `rawColumns` calls when both are needed — the validation gate runs once.
+    public static func decodeColumns(_ f: [UInt8]) -> (baseTs: Int, columns: [Int16])? {
         guard f.count == bufferLength,
               verifyFrame(f, family: .whoop5).ok,
               isRecognizedV21Envelope(f),
@@ -126,7 +132,7 @@ public enum Whoop5RawImu {
         for c in 0..<6 {
             for i in 0..<sampleCount { out[c * sampleCount + i] = Int16(truncatingIfNeeded: i16(f, cols[c] + 2 * i)) }
         }
-        return out
+        return (Int(u32(f, tsOff)), out)
     }
 
     /// The strap unix-second stamp of this 1-second buffer (frame offset 15), or nil if too short. Public

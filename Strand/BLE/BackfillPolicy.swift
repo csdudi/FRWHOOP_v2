@@ -23,6 +23,21 @@ enum BackfillPolicy {
     static let emptyBackoffThreshold = 3                  // empties before the floor starts stretching
     static let maxEmptyBackoff: Double = 4                // cap → ~6-min event / 1-hr periodic floor
 
+    /// A connect/foreground attempt can land just before the 90-second floor.
+    /// Retry at the floor instead of leaving a connected strap idle until the
+    /// next 15-minute periodic timer. Other triggers keep their own cadence.
+    static func eventRetryDelay(trigger: BackfillTrigger, now: TimeInterval,
+                                lastBackfillAt: TimeInterval?) -> TimeInterval? {
+        switch trigger {
+        case .connect, .foreground: break
+        default: return nil
+        }
+        guard let lastBackfillAt else { return nil }
+        let elapsed = now - lastBackfillAt
+        guard elapsed >= 0, elapsed < eventFloorSeconds else { return nil }
+        return eventFloorSeconds - elapsed + 0.5
+    }
+
     /// `emptyStreak` = consecutive COMPLETED offloads that banked no sensor records (EmptySyncTracker).
     /// Past the threshold the AUTOMATIC triggers (.periodic/.strap) stretch their floor — each further
     /// empty doubles it, capped — so an off-wrist / not-banking strap that still emits EVENT packets
@@ -59,5 +74,22 @@ enum BackfillPolicy {
         case .strap:                 return !clockUntrusted && elapsed >= eventFloorSeconds * backoff
         case .periodic:              return !clockUntrusted && elapsed >= periodicFloorSeconds * backoff
         }
+    }
+}
+
+/// A silent SEND_HISTORICAL_DATA is not evidence that history is empty. One ordinary
+/// retry recovered a stalled phone session. Bound recovery independently of the
+/// productive-burst counter, and retain the budget across reconnects in this process.
+struct SilentOffloadRecovery {
+    private var usedRetry = false
+
+    mutating func consumeRetry(timedOut: Bool, connected: Bool, ackedChunks: Int,
+                               persistedRows: Bool, persistStalled: Bool,
+                               clockUntrusted: Bool) -> Bool {
+        if persistedRows { usedRetry = false; return false }
+        guard timedOut, connected, ackedChunks == 0, !persistStalled,
+              !clockUntrusted, !usedRetry else { return false }
+        usedRetry = true
+        return true
     }
 }

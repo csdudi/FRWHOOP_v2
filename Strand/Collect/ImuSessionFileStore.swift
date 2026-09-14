@@ -10,7 +10,6 @@ struct ImuPushRecord: Sendable {
 
 /// The slice of the IMU store the cloud-push object lane reads. A protocol so push tests can
 /// inject an in-memory source instead of the filesystem store.
-@MainActor
 protocol ImuSessionPushSource: Sendable {
     /// Distinct device ids with at least one registered session window.
     func pushDeviceIds() -> Set<String>
@@ -20,8 +19,9 @@ protocol ImuSessionPushSource: Sendable {
 }
 
 /// Canonical decoded 100 Hz IMU storage: UTC half-hour files with appendable 30-second zlib blocks.
-@MainActor
-final class ImuSessionFileStore {
+/// Thread-safe via an internal serial queue (T2-1: off the main actor; safe from `BackfillActor`).
+final class ImuSessionFileStore: @unchecked Sendable {
+    private let isolation = DispatchQueue(label: "com.noop.imu-session-file-store")
     struct Stats { let bytes: Int64; let coveredSeconds: Int; let firstTs: Int64? }
     struct ExportSegment { let name: String; let data: Data; let startTs, endTs: Int; let sampleCount: Int }
     /// Read-only projection of one registered capture window, for aggregating readers (the
@@ -60,6 +60,9 @@ final class ImuSessionFileStore {
     /// Session id → conflicted strap timestamps (mirror of `imu-conflicts.json`; loaded lazily).
     private var conflicts: [String: Set<Int64>] = [:]
 
+    /// Test-only: when true, appended-block verification always fails (exercises rollback).
+    var testFailAppendVerification = false
+
     /// `directory` overrides the whole directory (tests); `directoryComponent` + `defaultsKey` pick
     /// the namespace (bounded sessions vs the continuous recorder). Not private so tests can build
     /// isolated instances; production code uses `shared` / `continuous`.
@@ -90,9 +93,11 @@ final class ImuSessionFileStore {
     }
 
     func start(id: String, deviceId: String, fromMs: Int64) {
-        var value = windows().filter { $0.id != id }
-        value.append(Window(id: id, deviceId: deviceId, from: fromMs / 1_000, to: nil)); save(value)
-        try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
+        isolation.sync {
+            var value = windows().filter { $0.id != id }
+            value.append(Window(id: id, deviceId: deviceId, from: fromMs / 1_000, to: nil)); save(value)
+            try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
+        }
     }
     @discardableResult
     func complete(id: String, toMs: Int64) -> Bool {
@@ -137,7 +142,14 @@ final class ImuSessionFileStore {
 
     @discardableResult
     func append(deviceId: String, frame: [UInt8], receivedAtMs: Int64) -> Int {
-        appendRouting(deviceId: deviceId, frame: frame, receivedAtMs: receivedAtMs).count
+        guard let decoded = Whoop5RawImu.decodeColumns(frame) else { return 0 }
+        return append(deviceId: deviceId, ts: Int64(decoded.baseTs), columns: decoded.columns,
+                      receivedAtMs: receivedAtMs)
+    }
+
+    @discardableResult
+    func append(deviceId: String, ts: Int64, columns: [Int16], receivedAtMs: Int64) -> Int {
+        appendRouting(deviceId: deviceId, sourceTs: ts, columns: columns, receivedAtMs: receivedAtMs).count
     }
 
     /// Backfiller commit seam (FRWHOOP issue #1): append historical IMU buffers to every matching
@@ -145,31 +157,52 @@ final class ImuSessionFileStore {
     /// durably on disk — NO matching window is a success (nothing was owed), so an ordinary history
     /// sync never stalls on IMU. A false return makes the caller hold the trim ack (#57 pattern), so
     /// the strap re-sends the chunk next session instead of trimming past un-persisted session data.
-    func persistHistoricalImu(deviceId: String, frames: [[UInt8]],
+    func persistHistoricalImu(deviceId: String, records: [(baseTs: Int, columns: [Int16])],
                               receivedAtMs: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)) -> Bool {
-        var touched: Set<String> = []
-        for frame in frames {
-            touched.formUnion(appendRouting(deviceId: deviceId, frame: frame, receivedAtMs: receivedAtMs))
+        isolation.sync {
+            var touched: Set<String> = []
+            for record in records {
+                touched.formUnion(appendRouting(deviceId: deviceId, sourceTs: Int64(record.baseTs),
+                                                columns: record.columns, receivedAtMs: receivedAtMs))
+            }
+            let toFlush = touched.union(pendingSessionIds(deviceId: deviceId))
+            guard !toFlush.isEmpty else { return true }
+            var ok = true
+            for id in toFlush where !flushSession(id) { ok = false }
+            return ok
         }
-        // A re-delivered chunk (an earlier held ack) arrives as exact duplicates that queue nothing,
-        // but a failed first flush left those records PENDING — so flush every session for this
-        // device that still holds pending records, not only the sessions this call touched.
-        let toFlush = touched.union(pendingSessionIds(deviceId: deviceId))
-        guard !toFlush.isEmpty else { return true }
-        var ok = true
-        for id in toFlush where !flushSession(id) { ok = false }
-        return ok
     }
 
-    /// Route one raw 5/MG IMU buffer into every matching session window; returns the ids of sessions
+    func persistHistoricalImu(deviceId: String, frames: [[UInt8]],
+                              receivedAtMs: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)) -> Bool {
+        isolation.sync {
+            var records: [(baseTs: Int, columns: [Int16])] = []
+            records.reserveCapacity(frames.count)
+            for frame in frames {
+                guard let decoded = Whoop5RawImu.decodeColumns(frame) else { continue }
+                records.append((decoded.baseTs, decoded.columns))
+            }
+            var touched: Set<String> = []
+            for record in records {
+                touched.formUnion(appendRouting(deviceId: deviceId, sourceTs: Int64(record.baseTs),
+                                                columns: record.columns, receivedAtMs: receivedAtMs))
+            }
+            let toFlush = touched.union(pendingSessionIds(deviceId: deviceId))
+            guard !toFlush.isEmpty else { return true }
+            var ok = true
+            for id in toFlush where !flushSession(id) { ok = false }
+            return ok
+        }
+    }
+
+    /// Route one decoded 5/MG IMU buffer into every matching session window; returns the ids of sessions
     /// that QUEUED a new record. Duplicate policy (FRWHOOP issue #1): an identical payload at an
     /// already-stored strap second is discarded; a DIFFERENT payload keeps the first durable value
     /// and the second is recorded as conflict evidence — never silently merged or overwritten.
     /// Open live windows match by receipt time so the first complete one-second buffer after START
     /// is kept even when its source ts slightly predates the session wall clock.
-    private func appendRouting(deviceId: String, frame: [UInt8], receivedAtMs: Int64) -> Set<String> {
-        guard let ts = Whoop5RawImu.baseTs(frame), let columns = Whoop5RawImu.rawColumns(frame) else { return [] }
-        let sourceTs = Int64(ts)
+    private func appendRouting(deviceId: String, sourceTs: Int64, columns: [Int16],
+                               receivedAtMs: Int64) -> Set<String> {
         let receivedTs = receivedAtMs / 1_000
         var queued: Set<String> = []
         for window in windows() where window.deviceId == deviceId {
@@ -422,12 +455,10 @@ final class ImuSessionFileStore {
     /// callers on a durability-critical path (the Backfiller's flush-before-ack seam) must check it.
     @discardableResult
     private func flushSession(_ id: String) -> Bool {
-        guard segmentFiles(id).allSatisfy({ validSegmentFile($0) }) else { return false }
         let keys = pending.keys.filter { $0.hasPrefix("\(id)/") }
         var succeeded = true
         for key in keys where !flushKey(key) { succeeded = false }
         return succeeded && !pending.keys.contains { $0.hasPrefix("\(id)/") }
-            && segmentFiles(id).allSatisfy({ validSegmentFile($0) })
     }
 
     @discardableResult
@@ -445,8 +476,6 @@ final class ImuSessionFileStore {
                 try FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
                 if !FileManager.default.fileExists(atPath: url.path) {
                     try header(bucket).write(to: url, options: .atomic)
-                } else if !validSegmentFile(url) {
-                    return false
                 }
                 let handle = try FileHandle(forWritingTo: url)
                 let originalOffset = try handle.seekToEnd()
@@ -454,7 +483,7 @@ final class ImuSessionFileStore {
                     try handle.write(contentsOf: encoded)
                     try handle.synchronize()
                     try handle.close()
-                    guard validSegmentFile(url) else {
+                    guard verifyAppendedBlock(in: url, at: originalOffset, expected: encoded) else {
                         rollbackSegment(url, to: originalOffset)
                         return false
                     }
@@ -478,9 +507,54 @@ final class ImuSessionFileStore {
         return true
     }
 
-    private func validSegmentFile(_ url: URL) -> Bool {
-        guard let data = try? Data(contentsOf: url) else { return false }
-        return decodeFile(data).complete
+    /// Verifies ONLY the block just appended at `offset`. Whole-file revalidation on every flush was
+    /// redundant: `scan` fully decodes every complete block the first time a segment is touched per
+    /// launch (building the timestamp index), and externally-corrupted mid-session files are detected
+    /// at that next launch's `scan`, not at flush time. The ack-critical contract is that appended
+    /// bytes are verified on disk before the Backfiller's ack.
+    private func verifyAppendedBlock(in url: URL, at offset: UInt64, expected: Data) -> Bool {
+        if testFailAppendVerification { return false }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        let length = expected.count
+        guard length > 0 else { return false }
+        try? handle.seek(toOffset: offset)
+        guard let read = try? handle.read(upToCount: length), read.count == length else { return false }
+        guard read == expected else { return false }
+        return decodeBlock(read) != nil
+    }
+
+    /// Decode one on-disk block's payload (the 12-byte header + compressed body written by `block`).
+    private func decodeBlock(_ data: Data) -> [Record]? {
+        let bytes = [UInt8](data)
+        guard data.count >= 12 else { return nil }
+        let count = int32(bytes, 0), rawSize = int32(bytes, 4), compressedSize = int32(bytes, 8)
+        guard count > 0, count <= Self.blockSeconds,
+              compressedSize > 0, 12 + compressedSize == data.count else { return nil }
+        let expectedRawSize = count * (20 + Self.payloadBytes)
+        guard rawSize == expectedRawSize,
+              let raw = inflate(Data(bytes[12..<(12 + compressedSize)]), size: rawSize) else { return nil }
+        let rawBytes = [UInt8](raw)
+        var rawOffset = 0
+        var blockRecords: [Record] = []
+        blockRecords.reserveCapacity(count)
+        for _ in 0..<count {
+            guard rawOffset + 20 + Self.payloadBytes <= rawBytes.count else { return nil }
+            let ts = Int64(bigEndianBytes: rawBytes, at: rawOffset)
+            let received = Int64(bigEndianBytes: rawBytes, at: rawOffset + 8)
+            let length = int32(rawBytes, rawOffset + 16)
+            rawOffset += 20
+            guard length == Self.payloadBytes, rawOffset + length <= rawBytes.count else { return nil }
+            var columns: [Int16] = []
+            columns.reserveCapacity(Self.sampleRate * Self.axes)
+            for index in stride(from: rawOffset, to: rawOffset + length, by: 2) {
+                columns.append(Int16(bitPattern: UInt16(rawBytes[index]) | UInt16(rawBytes[index + 1]) << 8))
+            }
+            rawOffset += length
+            blockRecords.append(Record(ts: ts, receivedAtMs: received, columns: columns))
+        }
+        guard rawOffset == rawBytes.count else { return nil }
+        return blockRecords
     }
 
     private func rollbackSegment(_ url: URL, to offset: UInt64) {
@@ -510,6 +584,8 @@ final class ImuSessionFileStore {
     private func segmentFile(_ id: String, _ bucket: Int64) -> URL { sessionDirectory(id).appendingPathComponent("imu-\(Self.utcName(bucket)).imus") }
     private func segmentFiles(_ id: String) -> [URL] { ((try? FileManager.default.contentsOfDirectory(at: sessionDirectory(id), includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "imus" }.sorted { $0.lastPathComponent < $1.lastPathComponent } }
     private func scan(_ url: URL) -> [Int64: UInt64] {
+        // Fully decodes every complete block on first touch per launch — sufficient validation for
+        // pre-existing segment bytes; appended blocks are verified separately in flushKey.
         var map: [Int64: UInt64] = [:]
         for record in decode((try? Data(contentsOf: url)) ?? Data()) {
             map[record.ts] = Self.columnsDigest(record.columns)

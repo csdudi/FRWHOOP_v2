@@ -61,24 +61,47 @@ final class BackfillerImuSessionTests: XCTestCase {
 
     func testHistoricalImuReachesSinkBeforeAck() async {
         let store = SpyStore()
-        var imuFramesSeen = 0
+        var imuRecordsSeen = 0
         var acked = false
         let backfiller = Backfiller(
             store: store,
             deviceId: "devA",
             ackTrim: { _, _ in acked = true },
-            imuSessionSink: { _, frames in
-                imuFramesSeen += frames.count
+            imuSessionSink: { _, records in
+                imuRecordsSeen += records.count
                 return true
             })
         backfiller.begin(family: .whoop5)
         await backfiller.ingest(makeValidImuFrame(unix: 1_500))
         await backfiller.ingest(hexBytes(whoop5HistoryEndHex))
 
-        XCTAssertEqual(imuFramesSeen, 1)
+        XCTAssertEqual(imuRecordsSeen, 1)
         XCTAssertTrue(acked)
         XCTAssertFalse(backfiller.persistStalled)
         XCTAssertTrue(store.operations.contains("cursor"))
+    }
+
+    func testChunkTimingIncludesSlowDiagnosticAndArchiveCallbacksBeforeAck() async {
+        let store = SpyStore()
+        var acked = false
+        let backfiller = Backfiller(
+            store: store, deviceId: "devA",
+            ackTrim: { _, _ in acked = true },
+            log: { _ in try? await Task.sleep(nanoseconds: 20_000_000) },
+            rejectedSink: { _, _, _ in
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                return true
+            })
+        backfiller.begin(family: .whoop5)
+        await backfiller.ingest(makeValidImuFrame(unix: 1_500, seed: 1))
+        await backfiller.ingest(hexBytes(whoop5HistoryEndHex))
+        guard let sample = backfiller.sessionPhaseTimingSamples().last else {
+            return XCTFail("Missing chunk timing")
+        }
+        XCTAssertTrue(acked)
+        XCTAssertGreaterThanOrEqual(sample.diagnosticsMs, 20)
+        XCTAssertGreaterThanOrEqual(sample.archiveMs, 20)
+        XCTAssertGreaterThanOrEqual(sample.totalMs, sample.diagnosticsMs + sample.archiveMs)
     }
 
     func testImuFlushFailureStallsAck() async {
