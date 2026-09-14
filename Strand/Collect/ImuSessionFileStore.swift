@@ -10,7 +10,6 @@ struct ImuPushRecord: Sendable {
 
 /// The slice of the IMU store the cloud-push object lane reads. A protocol so push tests can
 /// inject an in-memory source instead of the filesystem store.
-@MainActor
 protocol ImuSessionPushSource: Sendable {
     /// Distinct device ids with at least one registered session window.
     func pushDeviceIds() -> Set<String>
@@ -20,8 +19,9 @@ protocol ImuSessionPushSource: Sendable {
 }
 
 /// Canonical decoded 100 Hz IMU storage: UTC half-hour files with appendable 30-second zlib blocks.
-@MainActor
-final class ImuSessionFileStore {
+/// Thread-safe via an internal serial queue (T2-1: off the main actor; safe from `BackfillActor`).
+final class ImuSessionFileStore: @unchecked Sendable {
+    private let isolation = DispatchQueue(label: "com.noop.imu-session-file-store")
     struct Stats { let bytes: Int64; let coveredSeconds: Int; let firstTs: Int64? }
     struct ExportSegment { let name: String; let data: Data; let startTs, endTs: Int; let sampleCount: Int }
     /// Read-only projection of one registered capture window, for aggregating readers (the
@@ -93,9 +93,11 @@ final class ImuSessionFileStore {
     }
 
     func start(id: String, deviceId: String, fromMs: Int64) {
-        var value = windows().filter { $0.id != id }
-        value.append(Window(id: id, deviceId: deviceId, from: fromMs / 1_000, to: nil)); save(value)
-        try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
+        isolation.sync {
+            var value = windows().filter { $0.id != id }
+            value.append(Window(id: id, deviceId: deviceId, from: fromMs / 1_000, to: nil)); save(value)
+            try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
+        }
     }
     @discardableResult
     func complete(id: String, toMs: Int64) -> Bool {
@@ -157,30 +159,40 @@ final class ImuSessionFileStore {
     /// the strap re-sends the chunk next session instead of trimming past un-persisted session data.
     func persistHistoricalImu(deviceId: String, records: [(baseTs: Int, columns: [Int16])],
                               receivedAtMs: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)) -> Bool {
-        var touched: Set<String> = []
-        for record in records {
-            touched.formUnion(appendRouting(deviceId: deviceId, sourceTs: Int64(record.baseTs),
-                                            columns: record.columns, receivedAtMs: receivedAtMs))
+        isolation.sync {
+            var touched: Set<String> = []
+            for record in records {
+                touched.formUnion(appendRouting(deviceId: deviceId, sourceTs: Int64(record.baseTs),
+                                                columns: record.columns, receivedAtMs: receivedAtMs))
+            }
+            let toFlush = touched.union(pendingSessionIds(deviceId: deviceId))
+            guard !toFlush.isEmpty else { return true }
+            var ok = true
+            for id in toFlush where !flushSession(id) { ok = false }
+            return ok
         }
-        // A re-delivered chunk (an earlier held ack) arrives as exact duplicates that queue nothing,
-        // but a failed first flush left those records PENDING — so flush every session for this
-        // device that still holds pending records, not only the sessions this call touched.
-        let toFlush = touched.union(pendingSessionIds(deviceId: deviceId))
-        guard !toFlush.isEmpty else { return true }
-        var ok = true
-        for id in toFlush where !flushSession(id) { ok = false }
-        return ok
     }
 
     func persistHistoricalImu(deviceId: String, frames: [[UInt8]],
                               receivedAtMs: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)) -> Bool {
-        var records: [(baseTs: Int, columns: [Int16])] = []
-        records.reserveCapacity(frames.count)
-        for frame in frames {
-            guard let decoded = Whoop5RawImu.decodeColumns(frame) else { continue }
-            records.append((decoded.baseTs, decoded.columns))
+        isolation.sync {
+            var records: [(baseTs: Int, columns: [Int16])] = []
+            records.reserveCapacity(frames.count)
+            for frame in frames {
+                guard let decoded = Whoop5RawImu.decodeColumns(frame) else { continue }
+                records.append((decoded.baseTs, decoded.columns))
+            }
+            var touched: Set<String> = []
+            for record in records {
+                touched.formUnion(appendRouting(deviceId: deviceId, sourceTs: Int64(record.baseTs),
+                                                columns: record.columns, receivedAtMs: receivedAtMs))
+            }
+            let toFlush = touched.union(pendingSessionIds(deviceId: deviceId))
+            guard !toFlush.isEmpty else { return true }
+            var ok = true
+            for id in toFlush where !flushSession(id) { ok = false }
+            return ok
         }
-        return persistHistoricalImu(deviceId: deviceId, records: records, receivedAtMs: receivedAtMs)
     }
 
     /// Route one decoded 5/MG IMU buffer into every matching session window; returns the ids of sessions

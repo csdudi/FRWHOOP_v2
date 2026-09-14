@@ -91,7 +91,7 @@ enum CloudPushWorker {
             receiverStateId: capabilities.receiverStateId
         )
 
-        let imuPushSource = await MainActor.run { ImuSessionFileStore.shared as ImuSessionPushSource }
+        let imuPushSource = ImuSessionFileStore.shared as ImuSessionPushSource
         let snapshot = CloudPushSnapshot(db: db, imuPushSource: imuPushSource)
         let progress = CloudPushProgressStore(namespace: namespace)
         let startIndex = CloudPushSettings.nextDeviceIndex(namespace: namespace)
