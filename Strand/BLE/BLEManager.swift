@@ -1488,8 +1488,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // the `deviceRowForTest` helper), so this is dormant, but still wrong data on disk.
         let registeredName = (try? registry.all())?.first(where: { $0.id == deviceId })?.displayName
         try? await store.upsertDevice(id: deviceId, mac: nil, name: registeredName)
-        // FRWHOOP fork: raw capture defaults ON (the research corpus requires the raw stream);
-        // upstream NOOP defaults it off. Set "enableRawCapture" to false in UserDefaults to opt out.
+        // Raw capture defaults OFF (upstream NOOP). Set "enableRawCapture" to true to opt in.
         let enableRawCapture = UserDefaults.standard.noopRawCaptureEnabled
         // Research push: the live-banked hook below needs a DatabaseWriter, and `store` is local to
         // bootstrap — capture the writer (nonisolated/Sendable) so the closure doesn't need `self`.

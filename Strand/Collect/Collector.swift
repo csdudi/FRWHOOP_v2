@@ -4,11 +4,10 @@ import WhoopStore
 import StrandAnalytics
 
 extension UserDefaults {
-    /// FRWHOOP fork: raw capture defaults ON — the research corpus requires the raw stream, and
-    /// patients are treated as fully consented. Upstream NOOP defaults this off. Writing
-    /// `enableRawCapture = false` explicitly still opts out.
+    /// Raw capture defaults OFF (matches upstream NOOP). Set `enableRawCapture = true` in
+    /// UserDefaults to opt in to persisting raw offload batches.
     var noopRawCaptureEnabled: Bool {
-        if object(forKey: "enableRawCapture") == nil { return true }
+        if object(forKey: "enableRawCapture") == nil { return false }
         return bool(forKey: "enableRawCapture")
     }
 }
