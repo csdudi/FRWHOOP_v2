@@ -93,3 +93,18 @@ struct SilentOffloadRecovery {
         return true
     }
 }
+
+/// Share the in-flight store setup so every caller waits for the complete
+/// collector + backfill-actor configuration, not merely collector allocation.
+@MainActor
+final class BackfillStoreBootstrap {
+    private var inFlight: Task<Void, Never>?
+
+    func run(_ operation: @escaping @MainActor () async -> Void) async {
+        if let inFlight { await inFlight.value; return }
+        let task = Task { @MainActor in await operation() }
+        inFlight = task
+        await task.value
+        inFlight = nil
+    }
+}

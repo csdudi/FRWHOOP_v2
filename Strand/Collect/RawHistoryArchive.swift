@@ -164,7 +164,7 @@ struct RawHistoryArchive {
         // Build the new JSONL lines (each newline-terminated). The version that drives floor-aware
         // retention (#344) is re-derived per line from the stored frame inside `evictLines`.
         let newLines: [String] = frames.map { f in
-            let hex = f.map { String(format: "%02x", $0) }.joined()
+            let hex = Self.encodeHex(f)
             // Hand-built JSON: the only dynamic field is hex (always [0-9a-f]) so no escaping is
             // needed, and this avoids a JSONEncoder allocation per frame on the offload hot path.
             return "{\"capturedAtMs\":\(capturedAtMs),\"trim\":\(Int(trim)),"
@@ -271,6 +271,55 @@ struct RawHistoryArchive {
                          zeroPayload: hasZeroPayload(bytes, family: family))
     }
 
+    private static let hexDigits = Array("0123456789abcdef".utf8)
+
+    /// Byte-oriented conversion avoids a format-parser/string allocation for every byte.
+    /// The JSONL representation remains byte-for-byte compatible with existing archives.
+    static func encodeHex(_ bytes: [UInt8]) -> String {
+        var encoded = [UInt8]()
+        encoded.reserveCapacity(bytes.count * 2)
+        for byte in bytes {
+            encoded.append(hexDigits[Int(byte >> 4)])
+            encoded.append(hexDigits[Int(byte & 15)])
+        }
+        return String(decoding: encoded, as: UTF8.self)
+    }
+
+    private static func nibble(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 48...57: return byte - 48
+        case 65...70: return byte - 65 + 10
+        case 97...102: return byte - 97 + 10
+        default: return nil
+        }
+    }
+
+    private static func decodeHex(_ utf8: [UInt8]) -> [UInt8]? {
+        if utf8.count.isMultiple(of: 2) {
+            var bytes = [UInt8]()
+            bytes.reserveCapacity(utf8.count / 2)
+            var offset = 0
+            while offset < utf8.count {
+                guard let high = nibble(utf8[offset]), let low = nibble(utf8[offset + 1]) else { break }
+                bytes.append((high << 4) | low)
+                offset += 2
+            }
+            if offset == utf8.count { return bytes }
+        }
+        // Preserve the previous parser's behavior for non-canonical legacy input
+        // (including signed pairs accepted by UInt8). Normal archive lines never take
+        // this path. Unicode/invalid input must not change retention classification.
+        let hex = String(decoding: utf8, as: UTF8.self)
+        guard hex.count.isMultiple(of: 2) else { return nil }
+        var bytes = [UInt8](); var i = hex.startIndex
+        while i < hex.endIndex {
+            let j = hex.index(i, offsetBy: 2)
+            guard let byte = UInt8(hex[i..<j], radix: 16) else { return nil }
+            bytes.append(byte); i = j
+        }
+        return bytes
+    }
+
     /// The frame bytes + family of one archived JSONL line, or `nil` if the line is malformed.
     /// Hand-parsed to match the hand-built writer: the only dynamic fields are `family` and the
     /// [0-9a-f] `frameHex`. Shared by `readAll` and retention so both agree on exactly which lines are
@@ -280,14 +329,10 @@ struct RawHistoryArchive {
         guard let fr = line.range(of: "\"family\":\""),
               let hr = line.range(of: "\"frameHex\":\"") else { return nil }
         let fam = String(line[fr.upperBound...].prefix { $0 != "\"" })
-        let hex = line[hr.upperBound...].prefix { $0 != "\"" }
-        guard let family = DeviceFamily(rawValue: fam), hex.count % 2 == 0 else { return nil }
-        var bytes = [UInt8](); bytes.reserveCapacity(hex.count / 2); var i = hex.startIndex
-        while i < hex.endIndex {
-            let j = hex.index(i, offsetBy: 2)
-            guard let b = UInt8(hex[i..<j], radix: 16) else { return nil }
-            bytes.append(b); i = j
-        }
+        // The writer's payload is ASCII hex. Scan its UTF-8 directly rather than
+        // advancing through thousands of Unicode grapheme clusters per sensor frame.
+        let hex = Array(line[hr.upperBound...].utf8.prefix { $0 != 34 })
+        guard let family = DeviceFamily(rawValue: fam), let bytes = decodeHex(hex) else { return nil }
         return (bytes, family)
     }
 
