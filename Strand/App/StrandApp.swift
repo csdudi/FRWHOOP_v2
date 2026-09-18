@@ -26,6 +26,7 @@ struct StrandApp: App {
         let router = NavRouter()
         _router = StateObject(wrappedValue: router)
         NotificationPresenter.shared.onCoachBriefTapped = { [weak router] in router?.openCoach() }
+        NotificationPresenter.shared.onDayLogTapped = { [weak router] in router?.openDayLog() }
     }
 
     @StateObject private var model = AppModel()
@@ -50,6 +51,7 @@ struct StrandApp: App {
                 .environmentObject(model.ble)   // #334: Today pull-to-sync reads BLEManager (no HR churn)
                 .environmentObject(model.live)
                 .environmentObject(model.repo)
+                .environmentObject(model.baseline)
                 .environmentObject(model.profile)
                 .environmentObject(model.behavior)
                 .environmentObject(model.intelligence)

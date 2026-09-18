@@ -32,6 +32,8 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
     case powerSaving = "Power saving"
     case settings = "Settings"
     case testCentre = "Test Centre"
+    case baseline = "Baseline"
+    case treatment = "Treatment"
 
     var id: String { rawValue }
 
@@ -72,6 +74,8 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .powerSaving: return "Power saving"
         case .settings: return "Settings"
         case .testCentre: return "Test Centre"
+        case .baseline: return "Baseline"
+        case .treatment: return "Treatment"
         }
     }
 
@@ -114,6 +118,8 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .powerSaving: return String(localized: "Power saving")
         case .settings: return String(localized: "Settings")
         case .testCentre: return String(localized: "Test Centre")
+        case .baseline: return String(localized: "Baseline")
+        case .treatment: return String(localized: "Treatment")
         }
     }
 
@@ -149,6 +155,8 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .powerSaving: return "battery.25"
         case .settings: return "gearshape.fill"
         case .testCentre: return "stethoscope"
+        case .baseline: return "rectangle.split.2x1"
+        case .treatment: return "cross.case"
         }
     }
 }
@@ -167,12 +175,12 @@ struct NavGroup: Identifiable {
     /// The 5 sidebar sections, in order, mirroring the iOS More-tab grouping idiom (Insights / Body /
     /// Data & App) plus Today + Sleep as their own top sections. Devices/pairing sits at the TOP of the
     /// Data & App group so the first thing a new user reaches for stays near the surface. Every one of the
-    /// 27 `NavItem` cases appears exactly once across these groups (asserted by the M5 routability test).
+    /// 28 `NavItem` cases appears exactly once across these groups (asserted by the M5 routability test).
     static let all: [NavGroup] = [
         NavGroup(title: "Today", id: "today", items: [.today]),
         NavGroup(title: "Sleep", id: "sleep", items: [.sleep]),
         NavGroup(title: "Body", id: "body", items: [
-            .workouts, .live, .health, .stress, .intervals, .breathe,
+            .workouts, .live, .health, .stress, .intervals, .breathe, .baseline, .treatment,
         ]),
         // S6: the overlapping insight surfaces (Intelligence / What Moves You / Insights / Insights Hub)
         // all collapse under this single Insights group rather than scattering across the flat list.
@@ -200,6 +208,7 @@ struct RootView: View {
     /// Cross-screen navigation requests (e.g. Live → "Manage devices"). Observed here so a screen can
     /// switch the sidebar selection without owning it — see `NavRouter`.
     @EnvironmentObject var router: NavRouter
+    @EnvironmentObject var store: BaselineStore
     /// The liquid Today (default) vs the classic Today, same flag the iOS shell + Settings toggle read.
     @AppStorage("noop.liquidTodayEnabled") private var liquidTodayEnabled = true
     @State private var selection: NavItem? = .today
@@ -298,6 +307,10 @@ struct RootView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(StrandPalette.surfaceBase.ignoresSafeArea())
         }
+        .sheet(isPresented: $store.showContextSheet) {
+            BaselineDayLogSheet(days: store.displayDays(from: repo.days))
+                .environmentObject(store)
+        }
         .task {
             await repo.refresh()
             // Backup & Sync: on-launch catch-up. Gated on the auto toggle being ON (default OFF). A
@@ -331,6 +344,11 @@ struct RootView: View {
             // #1862: the Today Coach card's launcher hands off here, so the send/stream/consent surface
             // stays in exactly one place.
             case .coach: selection = .coach
+            case .baseline: selection = .baseline
+            case .treatment: selection = .treatment
+            case .dayLog:
+                selection = .today
+                store.openDayLog(on: store.calendarTodayKey)
             case nil: break
             }
             if dest != nil { router.requestedDestination = nil }
@@ -436,6 +454,8 @@ struct RootView: View {
         case .trends: TrendsView()
         case .workouts: WorkoutsView()
         case .health: HealthView()
+        case .baseline: BaselineMonitorView()
+        case .treatment: TreatmentCaregiverView()
         case .stress: StressView()
         case .labBook: LabBookView()
         case .rhythm: RhythmHost()

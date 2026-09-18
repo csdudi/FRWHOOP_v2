@@ -34,6 +34,11 @@ final class NavRouter: ObservableObject {
         /// surface of its own — it hands the question to the one screen that already has them.
         /// Also the K5 scheduled morning-brief notification's tap-through target.
         case coach
+        /// Baseline tab (iPhone primary tab / macOS sidebar). Treatment is a primary tab on iPhone.
+        case baseline
+        case treatment
+        /// Daily log sheet, opened from Today or the evening reminder.
+        case dayLog
 
         var id: String { rawValue }
 
@@ -67,6 +72,9 @@ final class NavRouter: ObservableObject {
     func openDevices() { requestedDestination = .devices }
     /// #1862: open Coach, optionally with a question the launcher already collected.
     func openCoach() { requestedDestination = .coach }
+    func openBaseline() { requestedDestination = .baseline }
+    func openTreatment() { requestedDestination = .treatment }
+    func openDayLog() { requestedDestination = .dayLog }
     /// Open the v5 Insights hub (the n-of-1 "what moves your Charge" surface).
     func openInsightsHub() { requestedDestination = .insightsHub }
     /// Open the Lab Book (private health-records logbook).

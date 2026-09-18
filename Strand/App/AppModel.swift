@@ -49,6 +49,8 @@ final class AppModel: ObservableObject {
     let ble: BLEManager
     /// Read model over the on-device store (dashboard + detail screens).
     let repo: Repository
+    /// Shared longitudinal baseline + treatment course (Monitor and Treatment tabs).
+    let baseline = BaselineStore()
     /// User profile (age/sex/body/HR-max) for zones, calories, baselines.
     let profile = ProfileStore()
     /// Behaviour settings: double-tap action, wear automation, zone coaching, smart alarm, illness watch.

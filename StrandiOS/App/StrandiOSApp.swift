@@ -70,6 +70,7 @@ struct StrandiOSApp: App {
         let router = NavRouter()
         _router = StateObject(wrappedValue: router)
         NotificationPresenter.shared.onCoachBriefTapped = { [weak router] in router?.openCoach() }
+        NotificationPresenter.shared.onDayLogTapped = { [weak router] in router?.openDayLog() }
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
         // #1538: a strap offload completes while the app is BACKGROUNDED — it stays alive as a
@@ -165,6 +166,7 @@ struct StrandiOSApp: App {
                 .environmentObject(model.ble)   // #334: Today pull-to-sync reads BLEManager (no HR churn)
                 .environmentObject(model.live)
                 .environmentObject(model.repo)
+                .environmentObject(model.baseline)
                 .environmentObject(model.profile)
                 .environmentObject(model.behavior)
                 .environmentObject(model.intelligence)

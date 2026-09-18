@@ -37,6 +37,7 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
     /// at-root re-tap of the active tab (#198 follow-up). Default 0 never changes, so macOS and every
     /// non-tab screen keep their exact prior scroll behaviour.
     @Environment(\.scrollToTopSignal) private var scrollToTopSignal
+    @Environment(\.screenScaffoldUsesNavChrome) private var usesNavChrome
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -49,7 +50,9 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
             // Unified side margins matching the floating navigation bar so every page's cards + header line up
             // to the same edges (2026-07-02); macOS keeps the classic 28 in the #else branch.
             .padding(.horizontal, NoopMetrics.screenHPadding)
-            .padding(.top, 24)
+            // Tab roots hide the system nav bar (24pt is enough). Pushed More screens keep a
+            // transparent back button that otherwise sits on top of the in-content title.
+            .padding(.top, usesNavChrome ? 56 : 24)
             // The tab bar floats over the scroll content, so the last card sat hidden behind it.
             // Reserve extra bottom scroll room so every screen's final card clears the floating bar.
             .padding(.bottom, NoopMetrics.tabBarClearance)
@@ -103,32 +106,54 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
     @ViewBuilder private var column: some View {
         if lazy {
             LazyVStack(alignment: .leading, spacing: 20) {
-                if title != nil || subtitle != nil { header }
+                if showsHeader { header }
                 content()
             }
         } else {
             VStack(alignment: .leading, spacing: 20) {
-                if title != nil || subtitle != nil { header }
+                if showsHeader { header }
                 content()
             }
         }
     }
 
+    private var showsHeader: Bool {
+        title != nil || subtitle != nil
+    }
+
     private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
                 if let title {
                     // Match the liquid home's title face (SF Rounded 28) so every page's header reads
                     // identically (2026-07-02 cohesion pass).
                     Text(title).font(StrandFont.rounded(28)).foregroundStyle(StrandPalette.textPrimary)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.72)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let subtitle {
                     Text(subtitle).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                        .lineLimit(4)
+                        .minimumScaleFactor(0.85)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: 0)
             trailing()
         }
+    }
+}
+
+private struct ScreenScaffoldNavChromeKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// True when this screen is pushed under a system back button (iPhone More destinations).
+    var screenScaffoldUsesNavChrome: Bool {
+        get { self[ScreenScaffoldNavChromeKey.self] }
+        set { self[ScreenScaffoldNavChromeKey.self] = newValue }
     }
 }
 

@@ -43,6 +43,8 @@ struct TrendsView: View {
         }
     }
 
+    var embedded: Bool = false
+
     @State private var range: Range = .quarter
 
     // #436 — shareable offline trends report (PDF over a date range). The sheet owns its
@@ -254,84 +256,66 @@ struct TrendsView: View {
     }
 
     var body: some View {
-        // The liquid metric cards now tap through to their MetricDetailView (matching Today's card
-        // taps + Explore's rows). On iOS each tab already supplies a NavigationStack, so those pushes
-        // land in the ambient stack. On macOS the .trends detail pane has NO enclosing NavigationStack
-        // (RootView), so — exactly like MetricExplorerView (#753) — wrap the scaffold in one here so the
-        // pushes get Back chrome instead of hanging. The SAME shared scaffold renders on both.
-        #if os(macOS)
-        // Register the value routes at THIS stack's root; on iOS the tab shell's stack registers
-        // them instead (once per stack — a double registration double-pushes, #38).
-        NavigationStack { scaffold.tabRouteDestinations() }
-        #else
-        scaffold
-        #endif
+        Group {
+            if embedded {
+                trendsContent
+            } else {
+                #if os(macOS)
+                NavigationStack { scaffold.tabRouteDestinations() }
+                #else
+                scaffold
+                #endif
+            }
+        }
+        .sheet(isPresented: $showingReport) {
+            TrendsReportSheet(days: repo.days)
+        }
+        .task(id: repo.days.count) {
+            let s = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
+            sleepPerfByDay = Dictionary(s.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+        }
     }
 
     private var scaffold: some View {
         ScreenScaffold(title: "Trends", subtitle: "The thread of you over time.",
-                       // PERF (scroll): lazy column — byte-identical layout (LazyVStack == eager VStack
-                       // alignment/spacing/header). The content is one inner eager VStack, so the staggered
-                       // section reveal is unchanged; this only defers building that stack until it scrolls in.
                        onRefresh: { await repo.refresh() },
                        lazy: true,
                        topBackground: liquidScaffoldSky()) {
-            if repo.days.isEmpty {
-                ComingSoon(what: repo.loaded
-                    ? "Trends need history to draw. Import your WHOOP export in Data Sources to see weeks, months and years instantly."
-                    : "Loading your history…")
-            } else {
-                // Resolve each metric's window ONCE per body and pass the results
-                // down — rangeBar/heroRecovery/smallMultiples all reuse these
-                // instead of re-filtering repo.days through caption/widened/
-                // windowPoints on every render (hover, animation, 1 Hz HR tick).
-                let recovery = resolve { $0.recovery }
-                let hrv = resolve { $0.avgHrv }
-                let rhr = resolve { $0.restingHr.map(Double.init) }
-                let strain = resolve { $0.strain }
-                // Rest = the sleep_performance composite — the same number the Today Rest score shows
-                // (#732); see sleepPerfByDay. resolve() still does the windowing/widening.
-                let rest = resolve { sleepPerfByDay[$0.day] }
-                VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                    // The main card list ripples in once on appear (Reduce-Motion safe).
-                    Group {
-                        // Week-in-review digest (#208) with prev/next week browsing (#710) — self-hides
-                        // only when NO week in history has data. Past weeks render in the same format.
-                        weeklyDigestNav
-                            .staggeredAppear(index: 0)
-                        // The Charge / Effort / Rest trio, presented in NOOP's pip language.
-                        weekInReview(charge: recovery, effort: strain, rest: rest)
-                            .staggeredAppear(index: 1)
-                        rangeBar(recovery: recovery)
-                            .staggeredAppear(index: 2)
-                        heroRecovery(recovery: recovery)
-                            .staggeredAppear(index: 3)
-                        smallMultiples(hrv: hrv, rhr: rhr, strain: strain)
-                            .staggeredAppear(index: 4)
-                        // Long-horizon training load (CTL/ATL/TSB). Uses the FULL history, not the
-                        // range window — chronic load is inherently a 42-day horizon. Self-hides its
-                        // chart behind an honest "needs N more days" state until enough history exists.
-                        TrainingLoadCard(days: repo.days)
-                            .staggeredAppear(index: 5)
-                        yearStrip
-                            .staggeredAppear(index: 6)
-                        exportReportRow
-                            .staggeredAppear(index: 7)
-                    }
+            trendsContent
+        }
+    }
+
+    @ViewBuilder private var trendsContent: some View {
+        if repo.days.isEmpty {
+            ComingSoon(what: repo.loaded
+                ? "Trends need history to draw. Import your WHOOP export in Data Sources to see weeks, months and years instantly."
+                : "Loading your history…")
+        } else {
+            let recovery = resolve { $0.recovery }
+            let hrv = resolve { $0.avgHrv }
+            let rhr = resolve { $0.restingHr.map(Double.init) }
+            let strain = resolve { $0.strain }
+            let rest = resolve { sleepPerfByDay[$0.day] }
+            VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
+                Group {
+                    weeklyDigestNav
+                        .staggeredAppear(index: 0)
+                    weekInReview(charge: recovery, effort: strain, rest: rest)
+                        .staggeredAppear(index: 1)
+                    rangeBar(recovery: recovery)
+                        .staggeredAppear(index: 2)
+                    heroRecovery(recovery: recovery)
+                        .staggeredAppear(index: 3)
+                    smallMultiples(hrv: hrv, rhr: rhr, strain: strain)
+                        .staggeredAppear(index: 4)
+                    TrainingLoadCard(days: repo.days)
+                        .staggeredAppear(index: 5)
+                    yearStrip
+                        .staggeredAppear(index: 6)
+                    exportReportRow
+                        .staggeredAppear(index: 7)
                 }
             }
-        }
-        // #436 — present the offline trends-report exporter (range picker + PDF export).
-        .sheet(isPresented: $showingReport) {
-            TrendsReportSheet(days: repo.days)
-        }
-        // #732 — load the resolved sleep_performance series so Rest plots the SAME composite the Today
-        // Rest score uses (not raw efficiency). Mirrors TodayView's restScore read. Keyed on the day
-        // count so a newly-banked/-scored night refreshes Rest reactively, like the other metrics that
-        // read `repo.days` directly (and like the Android LaunchedEffect(days) twin).
-        .task(id: repo.days.count) {
-            let s = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
-            sleepPerfByDay = Dictionary(s.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         }
     }
 
