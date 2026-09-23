@@ -1,0 +1,4 @@
+UniTS-style reconstruction — trained offline, shipped as UniTS_AD.mlpackage (units-ad-coreml-v2).
+TimesFM-style forecast student — TimesFM3_Student.mlpackage (timesfm3-student-v2). SHA256 pins: UniTS_AD.sha256, TimesFM3_Student.sha256.
+Google TimesFM 3.0 330M weights are not in the app (non-commercial). Harvard UniTS public transformer weights are not bundled.
+No on-device training. Re-export: python3 Tools/units-watchdog/train_export.py

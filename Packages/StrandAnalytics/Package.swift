@@ -10,7 +10,12 @@ let package = Package(
         .package(path: "../WhoopStore"),
     ],
     targets: [
-        .target(name: "StrandAnalytics", dependencies: ["WhoopProtocol", "WhoopStore"]),
+        .target(name: "StrandAnalytics",
+                dependencies: ["WhoopProtocol", "WhoopStore"],
+                resources: [
+                    .copy("Resources/UniTS_AD.mlpackage"),
+                    .copy("Resources/TimesFM3_Student.mlpackage"),
+                ]),
         // WhoopStore is declared on the TEST target as well as the library: the Oura respiration
         // scoring-exclusion tests assert on `OuraRespScale` (the seam that keeps the ring's 0x6A rows
         // out of the stager), and a transitively-visible module is not something a test should rely on.

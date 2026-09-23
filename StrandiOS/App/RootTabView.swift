@@ -26,6 +26,7 @@ struct RootTabView: View {
     /// Cross-screen navigation requests (e.g. Live → "Manage devices"). Devices isn't a tab — it lives
     /// behind the More list — so a request presents it as a sheet, matching the quick-action screens.
     @EnvironmentObject private var router: NavRouter
+    @EnvironmentObject private var baseline: BaselineStore
     /// The scene-local receiver for actions chosen from NOOP's Home Screen icon menu.
     @EnvironmentObject private var homeScreenQuickActions: HomeScreenQuickActionSceneDelegate
 
@@ -36,8 +37,8 @@ struct RootTabView: View {
     /// A routed v5 pillar screen (Insights hub / Lab Book / fused record / Rhythm) presented as a sheet
     /// when a hub row deep-links to it via NavRouter. nil = closed.
     @State private var routedPillar: NavRouter.Destination?
-    /// Selected tab — bound so tab switches can crossfade (README §Motion: ~240ms opacity swap
-    /// between tab roots, calm easing). Defaults to Today.
+    /// Selected tab. Defaults to Today. Switches do not animate the whole TabView
+    /// (that interpolates the system bar and can clip the page).
     @State private var selectedTab: Int = 0
     /// One `NavigationPath` per tab, indexed by tab tag. Re-tapping the already-active tab pops
     /// that tab's stack to its root (#135) by clearing its path — an animated pop that leaves the
@@ -77,7 +78,7 @@ struct RootTabView: View {
                 if tag == selectedTab {
                     reselectTab(tag)
                 } else {
-                    selectedTab = tag
+                    selectTab(tag)
                 }
             }
         )
@@ -90,6 +91,12 @@ struct RootTabView: View {
         } else {
             scrollTop[tag] += 1
         }
+    }
+
+    /// Swap tabs without driving an implicit animation on the system tab bar.
+    private func selectTab(_ tag: Int) {
+        guard tag != selectedTab else { return }
+        selectedTab = tag
     }
 
     /// The anywhere-swipe tab-switch drag (2026-07-02). Held as a property so the attachment site can
@@ -109,20 +116,19 @@ struct RootTabView: View {
                 guard abs(dx) > 60, abs(dx) > abs(dy) * 1.6 else { return }
                 let next = min(4, max(0, selectedTab + (dx < 0 ? 1 : -1)))
                 if next != selectedTab {
-                    withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = next }
+                    selectTab(next)
                 }
             }
     }
 
     var body: some View {
-        // The platform tab bar is intentionally left fully native. iOS 26 supplies Liquid Glass and
-        // its dynamic interaction with scrolling content automatically; older supported releases use
-        // the corresponding system material and safe-area behaviour from the same TabView.
+        // Native TabView: iOS 26 supplies Liquid Glass. Do not force an opaque bar —
+        // that reserved a full-height strip and clipped Today’s last cards above the pill.
         TabView(selection: nativeTabSelection) {
             tab(todayTabRoot, "Today", "square.grid.2x2", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
-            tab(TrendsView(), "Trends", "chart.line.uptrend.xyaxis", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
+            tab(BaselineMonitorView(), "Baseline", "rectangle.split.2x1", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
             tab(SleepView(), "Sleep", "bed.double", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
-            tab(MedicationsView(), "Meds", "pills.fill", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
+            tab(TreatmentCaregiverView(), "Treatment", "pills", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
             moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
@@ -133,9 +139,6 @@ struct RootTabView: View {
             ForceQuitSyncBanner()
         }
         .noopTabBarAutoHide(bottomBarAutoHide)
-            // Tab crossfade — README §Motion: ~240ms opacity swap between tab roots, global calm
-            // easing cubic-bezier(0.22,1,0.36,1).
-            .animation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24), value: selectedTab)
             // Swipe left/right anywhere to move between tabs (2026-07-02), but ONLY while the current
             // tab is at its root. Attaching this ancestor drag gesture unconditionally defeated the
             // edge-restriction of a pushed NavigationStack screen's native interactive-pop gesture —
@@ -171,6 +174,7 @@ struct RootTabView: View {
                 guard let writer = await pushRepo.registryWriterForPush() else { return }
                 CloudPushScheduler.enqueueLaunchCatchUp(db: writer)
             }
+            DayLogReminder.activate()
         }
         // Quick-action sheet presents with the calm easing (~0.42s) per the README sheet spec —
         // the easing is applied where `quickAction` is set (see `presentQuickAction`), keeping the
@@ -188,6 +192,11 @@ struct RootTabView: View {
         .sheet(item: $routedPillar) { dest in
             pillarScreen(dest)
         }
+        .sheet(isPresented: $baseline.showContextSheet) {
+            BaselineDayLogSheet(days: baseline.displayDays(from: repo.days))
+                .environmentObject(baseline)
+                .noopSheetPresentation(largeFirst: true)
+        }
         // Honour a router request: Devices keeps its dedicated sheet; the v5 pillars route through the
         // shared pillar sheet. Cleared so the same tap can fire again later.
         .onChange(of: router.requestedDestination) { _, dest in
@@ -199,8 +208,8 @@ struct RootTabView: View {
                 routedPillar = dest
                 router.requestedDestination = nil
             case .trends:
-                // Trends is a primary tab on iPhone (not a pillar sheet) — switch to it.
-                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 1 }
+                selectTab(1)
+                baseline.trendsExpanded = true
                 router.requestedDestination = nil
             case .activeWorkout:
                 // The Today active-workout indicator opens Live through the quick-action Live sheet; once
@@ -211,12 +220,24 @@ struct RootTabView: View {
             case .liveSession:
                 // Live Sessions is presented from Today's own Start entry (a cover, not a routed sheet),
                 // so a deep-link lands on the Today tab where that entry lives.
-                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 0 }
+                selectTab(0)
                 router.requestedDestination = nil
             case .coach:
                 // #1862: the Today Coach launcher hands its question here. Coach is a pillar sheet on
                 // iPhone, the same as the Insights hub, so route it that way rather than switching tabs.
                 routedPillar = dest
+                router.requestedDestination = nil
+            case .baseline:
+                selectTab(1)
+                routedPillar = nil
+                router.requestedDestination = nil
+            case .treatment:
+                selectTab(3)
+                routedPillar = nil
+                router.requestedDestination = nil
+            case .dayLog:
+                selectTab(0)
+                baseline.openDayLog(on: baseline.calendarTodayKey)
                 router.requestedDestination = nil
             case .journal:
                 // The #627 Today journal widget opens the journal through the quick-action Journal sheet
@@ -279,7 +300,7 @@ struct RootTabView: View {
                 case .fusedRecord: FusedRecordHost()
                 case .rhythm: RhythmHost(onClose: { routedPillar = nil })
                 case .devices: DevicesView()
-                // .trends is never presented as a pillar sheet on iPhone (it's a primary tab — the
+                // .trends opens the Baseline tab with the Trends fold expanded.
                 // requestedDestination handler switches `selectedTab` instead), but the switch must stay
                 // exhaustive. Fall back to Trends inside the sheet host if it ever arrives here.
                 case .trends: TrendsView()
@@ -295,6 +316,9 @@ struct RootTabView: View {
                 // #1862: Coach IS presented here — the launcher sheet routes to it as a pillar, so unlike
                 // the fallbacks above this arm is the real destination, not a safety net.
                 case .coach: CoachView()
+                case .baseline: BaselineMonitorView()
+                case .treatment: TreatmentCaregiverView()
+                case .dayLog: LiquidTodayView()
                 }
             }
             // The Trends/Today fallbacks above emit TabRoute value pushes (#198), which need a
@@ -421,7 +445,7 @@ struct RootTabView: View {
                 moreSection("Insights") {
                     MoreRow("What Moves You", "wand.and.sparkles", .insightsHub)
                     MoreRow("Intelligence", "brain.head.profile", .intelligence)
-                    // Coach is back in the More list — its K3 top-level tab slot now holds Meds.
+                    // Coach stays in More. Tab bar is Today · Baseline · Sleep · Treatment · More.
                     MoreRow("Coach", "sparkles", .coach)
                     MoreRow("Insights", "lightbulb.fill", .insights)
                     MoreRow("Explore", "square.grid.2x2.fill", .explore)
@@ -431,6 +455,8 @@ struct RootTabView: View {
                     MoreRow("Live", "waveform.path.ecg", .live)
                     MoreRow("Workouts", "figure.run", .workouts)
                     MoreRow("Health", "heart.text.square.fill", .health)
+                    MoreRow("Baseline", "rectangle.split.2x1", .baseline)
+                    MoreRow("Treatment", "cross.case", .treatment)
                     MoreRow("Lab Book", "books.vertical.fill", .labBook)
                     MoreRow("Stress", "bolt.heart.fill", .stress)
                     MoreRow("Breathe", "wind", .breathe)
@@ -486,6 +512,7 @@ struct RootTabView: View {
                     .background(StrandPalette.surfaceBase.ignoresSafeArea())
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbarBackground(.hidden, for: .navigationBar)
+                    .environment(\.screenScaffoldUsesNavChrome, true)
             }
         }
         // Scroll the More index to the top on an at-root re-tap (#198 follow-up); read by its ScreenScaffold.
@@ -554,7 +581,7 @@ struct RootTabView: View {
 /// registration in `moreTab`.
 private enum MoreDestination: Hashable {
     case insightsHub, intelligence, coach, insights, explore, compare
-    case live, workouts, health, labBook, stress, breathe, intervals, rhythm
+    case live, workouts, health, baseline, treatment, labBook, stress, breathe, intervals, rhythm
     case fusedRecord, appleHealth, miBand, dataSources, backupSync, selfHostedPush, shortcutsExport, noopLimitations
     case alarms, automations, testCentre, siriShortcuts, powerSaving, settings
 
@@ -569,6 +596,8 @@ private enum MoreDestination: Hashable {
         case .live:            LiveView()
         case .workouts:        WorkoutsView()
         case .health:          HealthView()
+        case .baseline:        BaselineMonitorView()
+        case .treatment:       TreatmentCaregiverView()
         case .labBook:         LabBookView()
         case .stress:          StressView()
         case .breathe:         BreathingView()

@@ -90,6 +90,9 @@ struct TestCentreView: View {
                        subtitle: "Turn on a test for the thing that's wrong, wear the strap, then tap Report. All on \(Platform.deviceNounPhrase).") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                 domainModesCard.staggeredAppear(index: 0)
+#if DEBUG
+                watchdogTestCard.staggeredAppear(index: 1)
+#endif
                 syncStatusCard.staggeredAppear(index: 1)
                 diagnosticToolsCard.staggeredAppear(index: 2)
                 if is5MG { rawDataCollectorCard.staggeredAppear(index: 3) }
@@ -243,6 +246,49 @@ struct TestCentreView: View {
             }
         }
     }
+
+#if DEBUG
+    @ViewBuilder private var watchdogTestCard: some View {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                Text("WATCHDOG")
+                    .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                Text(model.baseline.watchdogResult?.headline ?? "No tick yet. Pair the strap, open Baseline, or tap Tick now.")
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(model.baseline.watchdogResult?.qualityLine ?? "Interval \(model.baseline.liveIntervalMinutes) min")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                HStack(spacing: NoopMetrics.space3) {
+                    NoopButton("Tick now", systemImage: "timer", kind: .secondary) {
+                        Task { await model.watchdog.tick() }
+                    }
+                    NoopButton("Quiet", systemImage: "checkmark", kind: .secondary) {
+                        Task { await model.watchdog.tick(inject: .quiet) }
+                    }
+                    NoopButton("Severe", systemImage: "exclamationmark.triangle", kind: .secondary) {
+                        Task { await model.watchdog.tick(inject: .severe) }
+                    }
+                }
+                NoopButton("Test notification", systemImage: "bell", kind: .secondary) {
+                    WatchdogNotifier.requestAuthorization()
+                    if let r = model.baseline.watchdogResult {
+                        WatchdogNotifier.post(r, test: true)
+                    } else {
+                        Task {
+                            await model.watchdog.tick(inject: .severe)
+                            if let r = model.baseline.watchdogResult {
+                                WatchdogNotifier.post(r, test: true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
 
     @ViewBuilder private var syncStatusCard: some View {
         NoopCard {

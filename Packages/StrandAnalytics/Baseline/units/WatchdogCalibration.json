@@ -1,0 +1,36 @@
+{
+  "version": "cal-v1",
+  "quiet_coverage": 0.95,
+  "cold_start_gain": 2.5,
+  "thresholds": {
+    "note": 1.0,
+    "active": 1.6,
+    "severe": 2.4,
+    "persist_ticks": 2,
+    "escalate_delta": 0.5,
+    "rearm_ticks": 15,
+    "forecast_alpha": 0.5
+  },
+  "sigma_scale": {
+    "hr": 1.0,
+    "rhr": 1.0,
+    "hrv": 1.0,
+    "temp": 1.0,
+    "resp": 1.0,
+    "spo2": 1.0
+  },
+  "population_priors": {
+    "hr": 60,
+    "rhr": 60,
+    "hrv_ms": 40,
+    "temp_c": 33.0,
+    "resp": 14,
+    "spo2": 97
+  },
+  "forecast": {
+    "teacher": "https://github.com/google-research/timesfm",
+    "checkpoint": "google/timesfm-3.0-pytorch",
+        "student": "timesfm3-student-v2",
+    "horizon_minutes": 5
+  }
+}

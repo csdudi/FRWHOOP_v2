@@ -6,7 +6,8 @@ import Foundation
 /// Entry points (all pure, deterministic functions — no DB access):
 ///   - `HRZones`        — HR-max + 5 zones from age; time-in-zone from `[HRSample]`.
 ///   - `HRVAnalyzer`    — RMSSD / SDNN with range + Malik ectopic filtering.
-///   - `Baselines`      — Winsorized-EWMA + trailing-window personal baselines.
+///   - `Baselines`      — Winsorized-EWMA + trailing-window personal baselines (Charge).
+///   - `LongitudinalBaseline` — 7-day EWMA + gapped 60-day median (not Charge).
 ///   - `RecoveryScorer` — resting HR + transparent 0–100 recovery composite.
 ///   - `StrainScorer`   — Edwards/Banister TRIMP → 0–21 logarithmic strain.
 ///   - `SleepStager`    — sleep/wake detection + APPROXIMATE 4-class staging.

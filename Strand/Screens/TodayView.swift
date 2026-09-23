@@ -222,6 +222,7 @@ struct TodayView: View {
     // passes clean tests), so it is left as a follow-up rather than rushed in alongside the load-path fix.
     @EnvironmentObject var profile: ProfileStore
     @EnvironmentObject var router: NavRouter
+    @EnvironmentObject var store: BaselineStore
     /// The "update ringer", the bell in the top bar opens this inbox; dismissed Today cards post into it.
     @EnvironmentObject var updateStore: UpdateStore
 
@@ -2312,11 +2313,12 @@ struct TodayView: View {
             }
             .accessibilityElement(children: .combine)
 
-            // S4: the Synthesis card collapses to a single one-liner that EXPANDS on tap. Default collapsed
-            // so the home screen stays tight; the live content (#506) is unchanged, only the chrome folds.
-            // The headline (synthesisCardStatus / the calibration status / the DEBUG frame) stays visible in
-            // both states, so a glance still reads today's verdict; the detail body reveals on tap.
-            synthesisCollapsible(d: d, score: score)
+            DayLogTodayButton()
+
+            BaselineTodayPeek()
+            if !store.usualsReady {
+                synthesisCollapsible(d: d, score: score)
+            }
 
             if let note = effortZeroNote {
                 HStack(alignment: .top, spacing: 6) {

@@ -23,6 +23,7 @@ struct LiquidTodayView: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var router: NavRouter
     @EnvironmentObject var profile: ProfileStore
+    @EnvironmentObject var store: BaselineStore
     // For the pull-to-sync gesture (#334): a pull kicks a manual strap history offload via ble.syncNow().
     // Observe BLEManager, NOT AppModel — AppModel @Publishes `bpm` on the ~1 Hz HR tick, so observing it
     // would re-render all of Today every second (the exact churn the LiveState leaves isolate). BLEManager
@@ -1125,7 +1126,11 @@ struct LiquidTodayView: View {
             .padding(.horizontal, 2)
             .padding(.top, 4)
 
-            Button { withAnimation(.easeInOut(duration: 0.2)) { synthesisExpanded.toggle() } } label: {
+            DayLogTodayButton(liquid: true)
+
+            BaselineTodayPeek(liquid: true)
+            if !store.usualsReady {
+                Button { withAnimation(.easeInOut(duration: 0.2)) { synthesisExpanded.toggle() } } label: {
                 card {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -1175,8 +1180,9 @@ struct LiquidTodayView: View {
                         }
                     }
                 }
+                }
+                .buttonStyle(LiquidPressStyle())
             }
-            .buttonStyle(LiquidPressStyle())
         }
     }
 
