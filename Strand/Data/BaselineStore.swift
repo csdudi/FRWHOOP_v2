@@ -63,7 +63,8 @@ final class BaselineStore: ObservableObject {
     @Published var showContextSheet = false
     @Published var loggingDay: String
     @Published var trendsExpanded = false
-    @Published var watchdogExpanded = false
+    @Published var watchdogResult: WatchdogResult?
+    @Published var liveIntervalMinutes: Int
     @Published var editingEventIndex: Int?
     @Published var trialExpanded = false
     @Published var watchCandidates: [BaselineWatchCandidate] = []
@@ -82,6 +83,8 @@ final class BaselineStore: ObservableObject {
         self.asOf = start
         self.longAsOf = start
         self.loggingDay = start
+        let storedInterval = defaults.integer(forKey: WatchdogConfig.intervalKey)
+        self.liveIntervalMinutes = WatchdogConfig.clampInterval(storedInterval == 0 ? WatchdogConfig.defaultLiveIntervalMinutes : storedInterval)
         if resetCourse {
             defaults.removeObject(forKey: eventsKey)
             defaults.removeObject(forKey: confoundersKey)
@@ -125,6 +128,31 @@ final class BaselineStore: ObservableObject {
         case .awakeRestHR, .awakeActiveHR, .continuousHR: return "Heart rate"
         case .wakingSteps: return "Steps"
         default: return series.planRow.planName
+        }
+    }
+
+    func setLiveInterval(_ minutes: Int) {
+        liveIntervalMinutes = WatchdogConfig.clampInterval(minutes)
+        defaults.set(liveIntervalMinutes, forKey: WatchdogConfig.intervalKey)
+    }
+
+    func applyWatchdog(_ result: WatchdogResult) {
+        watchdogResult = result
+    }
+
+    /// Usuals for every Watchdog vital, not only the series the patient currently has selected.
+    func watchdogPromptEvaluations(days: [DailyMetric]) -> [LBEvaluation] {
+        let needed: [LBSeries] = [
+            .sleepRHR, .awakeRestHR, .continuousHR,
+            .sleepHRVLn, .awakeRestHRVLn,
+            .sleepTemp, .sleepResp, .sleepSpO2Mean
+        ]
+        return needed.map { series in
+            LongitudinalBaseline.evaluate(
+                asOf: asOf,
+                series: series,
+                observations: observations(from: days, series: series),
+                trial: .none)
         }
     }
 
@@ -191,10 +219,18 @@ final class BaselineStore: ObservableObject {
         return "Demonstration series so each period can be read."
     }
 
-    /// Visible tape for this tab so the plots always have a usual to draw.
+    /// Caption under the series name: rails come from unconfounded nights of this window.
+    var quietRangeCaption: String {
+        let window = evaluation?.stableWindow.caption ?? "this series"
+        let k = evaluation?.kBandUsed ?? LongitudinalBaseline.params(for: series).kBand
+        return String(format: "Usual and k from nights without logged confounders · %@ · k %.2f",
+                      window, k)
+    }
+
+    /// Score nights on this phone. Empty repository → labelled demonstration tape only.
     func displayDays(from repoDays: [DailyMetric]) -> [DailyMetric] {
-        _ = repoDays
-        return Self.demoTape()
+        if repoDays.isEmpty { return Self.demoTape() }
+        return repoDays
     }
 
     func canShift(_ delta: Int, days: [DailyMetric]) -> Bool {
@@ -704,7 +740,7 @@ final class BaselineStore: ObservableObject {
             let o = byDay[day]
             let missing = o == nil || o?.qualityStatus != .ok
             let v = missing ? nil : o?.value
-            let acute = dayLogsByDay[day]?.acuteConfounders.isEmpty == false
+            let acute = dayLogsByDay[day]?.confoundsUsual == true
                 || !(confoundersByDay[day] ?? []).filter(\.isAcute).isEmpty
             out.append(BaselinePlotPoint(day: day, epoch: e, value: v,
                                          missing: missing, segment: segment,

@@ -94,8 +94,8 @@ extension LongitudinalBaseline {
     public static let slopeHorizonDays = 30
     public static let trustHideThreshold = 35
 
-    /// Table k is the prior. Live k follows the 95th percentile of |residual|/spread on the
-    /// stable window once that copy is established. Clamped so one wild week cannot explode the band.
+    /// Table k is the prior. Live k is the 95th percentile of |residual|/spread on **unconfounded**
+    /// nights only, once that clean copy is established. Clamped so one wild week cannot explode the band.
     public static func kBandFromStableWindow(tableK: Double, absResidualZ: [Double], nLong: Int) -> Double {
         guard nLong >= 14, absResidualZ.count >= 14 else { return tableK }
         let s = absResidualZ.filter(\.isFinite).sorted()
@@ -105,6 +105,34 @@ extension LongitudinalBaseline {
         let lo = tableK * 0.75
         let hi = tableK * 1.40
         return min(max(empirical, lo), hi)
+    }
+
+    /// No daily log, or a log with no usual-confounders, may train the rails.
+    public static func nightIsClean(_ epoch: Int, dayLogs: [String: LBDayLog]) -> Bool {
+        let d = isoFromEpochDay(epoch)
+        guard let log = dayLogs[d] else { return true }
+        return !log.confoundsUsual
+    }
+
+    /// Among real DailyMetric columns in one family, the series whose clean `k_used` is smallest.
+    /// Fake rest/active stand-ins (`hasDailyMetricColumn == false`) are ignored.
+    public static func quietestRealColumn(asOf: String,
+                                          tapes: [(LBSeries, [LBDailyObservation])],
+                                          dayLogs: [String: LBDayLog] = [:]) -> LBSeries? {
+        var best: (LBSeries, Double)?
+        let family = tapes.first(where: { $0.0.hasDailyMetricColumn })?.0.biometricFamily
+        for (series, obs) in tapes {
+            guard series.hasDailyMetricColumn else { continue }
+            if let family, series.biometricFamily != family { continue }
+            let ev = evaluate(asOf: asOf, series: series, observations: obs,
+                              trial: LBTrialRequest(dayLogsByDay: dayLogs))
+            let need = params(for: series).nLongEstablished
+            guard ev.nLong >= need else { continue }
+            if best == nil || ev.kBandUsed < best!.1 {
+                best = (series, ev.kBandUsed)
+            }
+        }
+        return best?.0
     }
 
     public static func stableWindow(for series: LBSeries) -> LBStableWindow {

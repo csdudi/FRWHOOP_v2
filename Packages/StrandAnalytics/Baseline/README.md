@@ -16,7 +16,11 @@ FRWHOOP_v2 has **no Node backend**. Nightly math runs in this package. Hosted `s
 | [FRWHOOP_BASELINE_FIELD_METHODS.md](FRWHOOP_BASELINE_FIELD_METHODS.md) | Methods appendix |
 | [FRWHOOP_BASELINE_FINAL_PLAN.md](FRWHOOP_BASELINE_FINAL_PLAN.md) | Source evaluation |
 | [FRWHOOP_BASELINE_CHANGE_SUMMARY_16_SEP.md](FRWHOOP_BASELINE_CHANGE_SUMMARY_16_SEP.md) | 16 Sep: eight review items + same-day follow-ups |
-| [FRWHOOP_BASELINE_CHANGE_SUMMARY_17_SEP.md](FRWHOOP_BASELINE_CHANGE_SUMMARY_17_SEP.md) | 17 Sep: NARA Baseline V1 — daily log v1 (suggestions needed), habit stratum, iPhone tabs |
+| [FRWHOOP_BASELINE_CHANGE_SUMMARY_17_SEP.md](FRWHOOP_BASELINE_CHANGE_SUMMARY_17_SEP.md) | 17 Sep work list: NARA Baseline V1 (daily log, habit stratum, iPhone shell) |
+| [../../docs/FRWHOOP_WATCHDOG_HOW_IT_WORKS.md](../../docs/FRWHOOP_WATCHDOG_HOW_IT_WORKS.md) | Short map of live Watchdog + Layer 1 Baseline |
+| [FRWHOOP_WATCHDOG.md](FRWHOOP_WATCHDOG.md) | Watchdog product contract (`watchdog-v2.2`, UniTS-AD + TimesFM student) |
+| [FRWHOOP_WATCHDOG_NEXT_21_SEP_2026.md](FRWHOOP_WATCHDOG_NEXT_21_SEP_2026.md) | Twelve review items as shipped |
+| [units/](units/) | Frozen Core ML pins, `WatchdogConfig.json`, calibration |
 | [fixtures/](fixtures/) | Synthetic daily tapes for tests (added with phase A code) |
 
 The same files are also kept under `docs/` so the repo docs tree still has them. Edit both, or copy this folder over `docs/FRWHOOP_BASELINE_*.md` after a change.

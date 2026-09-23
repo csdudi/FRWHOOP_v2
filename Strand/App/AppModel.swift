@@ -51,6 +51,8 @@ final class AppModel: ObservableObject {
     let repo: Repository
     /// Shared longitudinal baseline + treatment course (Monitor and Treatment tabs).
     let baseline = BaselineStore()
+    /// Live Watchdog ticks (1–10 min). Pure scoring lives in StrandAnalytics.
+    let watchdog = WatchdogService()
     /// User profile (age/sex/body/HR-max) for zones, calories, baselines.
     let profile = ProfileStore()
     /// Behaviour settings: double-tap action, wear automation, zone coaching, smart alarm, illness watch.
@@ -414,6 +416,7 @@ final class AppModel: ObservableObject {
             }
             #endif
             await self.repo.refresh()                          // surface any imported data at once
+            await MainActor.run { self.watchdog.start(on: self) }
             // A link can drop after a productive chunk stamped syncJob debt but before the terminal-burst
             // event. Resume that durable handoff on launch; this is a no-op when no job is owed.
             await self.syncEngine.drain(reason: .stateRestoration)

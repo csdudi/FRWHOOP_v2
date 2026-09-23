@@ -748,6 +748,14 @@ final class Repository: ObservableObject {
     /// Expose the shared store handle (used by the importer to persist mapped rows).
     func storeHandle() async -> WhoopStore? { await ensureStore() }
 
+    /// Active strap first, then other registered WHOOPs, then canonical history — same union the
+    /// live graphs use. Watchdog must not read only `deviceId` or a bonded 4.0 with banked rows
+    /// under another id looks empty.
+    func watchdogSourceIds() async -> [String] {
+        guard let store = await storeHandle() else { return [deviceId] }
+        return rawPhysiologyReadIds(store: store)
+    }
+
     /// CAPTURE-D (#797): the on-device DATA VOLUME read FRESH from the STORE (never the `@Published`
     /// dashboard caches), for the Display & Performance test mode's `dataVolume` line. dbRows is the raw
     /// decoded-stream footprint; importedDays is the count of imported daily-metric rows under the active

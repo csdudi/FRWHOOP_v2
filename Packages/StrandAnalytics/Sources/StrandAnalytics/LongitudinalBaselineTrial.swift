@@ -209,6 +209,11 @@ public struct LBDayLog: Equatable, Sendable, Codable {
 
     public var habitClass: LBHabitClass { workout.habitClass }
 
+    /// Illness, travel, extra med, alcohol, off-typical sleep or diet — nights that must not build the usual.
+    public var confoundsUsual: Bool {
+        feltIll || travel || extraMed || alcohol || !sleepTypical || !dietTypical
+    }
+
     /// Short everyday label: mood, rest vs trained, demand, plus whatever stood out.
     public var summaryLine: String {
         var parts = [mood.displayLabel, workout.habitClass == .trained ? "Trained" : "Rest",

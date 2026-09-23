@@ -270,4 +270,40 @@ final class LongitudinalBaselineReviewTests: XCTestCase {
         XCTAssertLessThan(abs(trained.zLong ?? 99), abs(mixed.zLong ?? 0),
                           "hard day should sit closer to other hard days\n\(trained.consoleReport)\n\(mixed.consoleReport)")
     }
+
+    func testConfoundedNightsDoNotBuildUsualOrK() {
+        let t = LongitudinalBaseline.isoEpochDay(asOf)!
+        var obs: [LBDailyObservation] = []
+        var logs: [String: LBDayLog] = [:]
+        // 63.9 stays inside k_learn (so mixed trim cannot drop it) but lifts mixed k_used.
+        for i in 1...50 {
+            let day = iso(t - i)
+            let sick = i % 2 == 0
+            obs.append(ok(day, sick ? 63.9 : 60))
+            logs[day] = LBDayLog(alcohol: sick, feltIll: sick)
+        }
+        obs.append(ok(asOf, 60))
+        let mixed = LongitudinalBaseline.evaluate(asOf: asOf, series: .sleepRHR, observations: obs)
+        let clean = LongitudinalBaseline.evaluate(
+            asOf: asOf, series: .sleepRHR, observations: obs,
+            trial: LBTrialRequest(dayLogsByDay: logs))
+        XCTAssertLessThan(clean.nCleanLong, mixed.nLong, clean.consoleReport)
+        XCTAssertEqual(clean.copyLong?.center ?? -1, 60, accuracy: 0.8, clean.consoleReport)
+        XCTAssertLessThan(clean.kBandUsed, mixed.kBandUsed, mixed.consoleReport + "\n" + clean.consoleReport)
+        XCTAssertGreaterThanOrEqual(clean.nCleanLong, 14)
+    }
+
+    func testQuietestRealColumnIgnoresFakeRestStandIn() {
+        let t = LongitudinalBaseline.isoEpochDay(asOf)!
+        let quiet = (0...40).map { ok(iso(t - $0), 60.0) }
+        var noisy: [LBDailyObservation] = []
+        for i in 0...40 {
+            noisy.append(ok(iso(t - i), i % 3 == 0 ? 80 : 60))
+        }
+        let winner = LongitudinalBaseline.quietestRealColumn(
+            asOf: asOf,
+            tapes: [(.awakeRestHR, noisy), (.sleepRHR, quiet)])
+        XCTAssertEqual(winner, .sleepRHR)
+        XCTAssertFalse(LBSeries.awakeRestHR.hasDailyMetricColumn)
+    }
 }

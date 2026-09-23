@@ -58,6 +58,20 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
         }
     }
 
+    /// LABEL: biometric family
+    /// Quiet-column pick stays inside one family. Sleep RHR is never compared to steps.
+    public var biometricFamily: String {
+        switch self {
+        case .sleepRHR, .awakeRestHR, .awakeActiveHR, .continuousHR: return "hr"
+        case .sleepHRVLn, .awakeRestHRVLn, .awakeActiveHRVLn, .continuousHRVLn: return "hrv"
+        case .sleepResp: return "resp"
+        case .sleepTemp: return "temp"
+        case .sleepSpO2Mean, .sleepSpO2Nadir, .awakeRestSpO2Mean, .awakeActiveSpO2Mean, .continuousSpO2Mean:
+            return "spo2"
+        case .wakingSteps, .wakingActiveMin: return "motion"
+        }
+    }
+
     /// LABEL: log-domain flag
     /// HRV math is on ln(RMSSD). Every other series stays in native units.
     public var usesLog: Bool {
@@ -348,6 +362,8 @@ public struct LBEvaluation: Equatable, Sendable {
     public var stableWindow: LBStableWindow = .overnightSleep
     public var habitClass: LBHabitClass = .unspecified
     public var habitMatched: Bool = false
+    /// Clean (unconfounded) nights that built the longer usual. Equal to nLong after the clean filter.
+    public var nCleanLong: Int = 0
     public var pChange: Double
     public var cusumS: Double
     public var regimeShift: Bool
@@ -402,8 +418,9 @@ public struct LBEvaluation: Equatable, Sendable {
                             twoBlockShift.map { String(format: "%.3f", $0) } ?? "—",
                             trimKeptFrac.map { String(format: "%.2f", $0) } ?? "—"))
         lines.append("  conf_7=\(confidencePct7)%  conf_long=\(confidencePctLong)%  trust_7=\(usualTrustPct7)%  trust_long=\(usualTrustPctLong)%  how_off_7=\(howUnusualPct7.map(String.init) ?? "—")  how_off_long=\(howUnusualPctLong.map(String.init) ?? "—")")
-        lines.append(String(format: "  k_table=%.2f  k_used=%.2f  window=%@  habit=%@ matched=%@",
-                            kBandTable, kBandUsed, stableWindow.rawValue, habitClass.rawValue, habitMatched ? "yes" : "no"))
+        lines.append(String(format: "  k_table=%.2f  k_used=%.2f  window=%@  habit=%@ matched=%@  n_clean=%d",
+                            kBandTable, kBandUsed, stableWindow.rawValue, habitClass.rawValue,
+                            habitMatched ? "yes" : "no", nCleanLong))
         lines.append("  slope=\(slopeLong.map { String(format: "%.4f", $0) } ?? "—") usable=\(slopeUsable ? "1" : "0")  expected_long=\(expectedLong.map { String(format: "%.4f", $0) } ?? "—")  stale=\(stale)  alert_eligible=\(alertEligible)")
         lines.append("  persist run=\(runLength) hits3=\(hits3) two_of_three=\(twoOfThree) worse=\(worse.map { $0 ? "1" : "0" } ?? "—")")
         if contextPrompt.shouldAsk {
@@ -1116,6 +1133,20 @@ public enum LongitudinalBaseline {
         return (s[n / 2 - 1] + s[n / 2]) / 2.0
     }
 
+    /// Newest 28 long nights: a 21-day drift lives here. Whole-window Theil–Sen is dominated by the flat pre-period.
+    static let slopeFitNights = 28
+
+    /// Newest 7 long nights' median sits ≥ k_learn spreads from the older nights: a step, not a drift.
+    static func recentBlockIsLevelStep(pairs: [(epoch: Int, value: Double)],
+                                       olderMedian: Double, spread: Double) -> Bool {
+        let newest = Array(pairs.suffix(7))
+        guard newest.count >= 7, spread > 0 else { return false }
+        let older = Array(pairs.dropLast(7))
+        let ref = median(older.map(\.value)) ?? olderMedian
+        guard let recent = median(newest.map(\.value)), ref.isFinite else { return false }
+        return abs(recent - ref) / spread >= Params.kLearn * 0.75
+    }
+
     // MARK: - One-day score (longer copy first, then 7-day)
 
     /// LABEL: score one civil day against history strictly before it
@@ -1141,6 +1172,7 @@ public enum LongitudinalBaseline {
         if let epochStart {
             longEpochs = longEpochs.filter { $0 >= epochStart }
         }
+        longEpochs = longEpochs.filter { nightIsClean($0, dayLogs: dayLogs) }
         let longTrain = mathValues(epochs: longEpochs, byDay: byDay, series: series)
         let nLongLowQ = countStatus(epochs: longEpochs, byDay: byDay, status: .lowQuality)
         let trim = trimLongList(longTrain, floor: spec.floor)
@@ -1198,34 +1230,45 @@ public enum LongitudinalBaseline {
                 }
             }
         }
-        let slope: Double? = theilSenSlope(xs: longPairs.map { Double($0.epoch) },
-                                           ys: longPairs.map(\.value))
-        let origin = longPairs.isEmpty ? tEpoch - Params.gapDays - 1
-            : (longPairs.first!.epoch + longPairs.last!.epoch) / 2
+        let slopePairs = Array(longPairs.suffix(slopeFitNights))
+        let slope: Double? = theilSenSlope(xs: slopePairs.map { Double($0.epoch) },
+                                           ys: slopePairs.map(\.value))
         let lastLongNight = longPairs.last?.epoch ?? (tEpoch - Params.gapDays - 1)
+        var origin = slopePairs.isEmpty ? lastLongNight
+            : (slopePairs.first!.epoch + slopePairs.last!.epoch) / 2
+        let recentStep = recentBlockIsLevelStep(pairs: longPairs,
+                                                olderMedian: centerLong ?? 0,
+                                                spread: spreadLong ?? spec.floor)
+        // Anchor the path so it passes through the last long night: intercept stays the long median.
+        if !recentStep, let s = slope, let c = centerLong, let last = slopePairs.last, abs(s) > 1e-9 {
+            let dt = (last.value - c) / s
+            if dt.isFinite, abs(dt) < Double(Params.lookbackLong * 2) {
+                origin = last.epoch - Int(dt.rounded())
+            }
+        }
         var residualSpread = spreadLong ?? spec.floor
-        if let c = centerLong, let s = slope, !longPairs.isEmpty {
-            let resid = longPairs.map { $0.value - (c + s * Double($0.epoch - origin)) }
+        if !recentStep, let c = centerLong, let s = slope, !slopePairs.isEmpty {
+            let resid = slopePairs.map { $0.value - (c + s * Double($0.epoch - origin)) }
             residualSpread = robustSpread(values: resid, center: 0, floor: spec.floor)
         }
-        let slopeUsable = slopeIsUsable(slope: slope ?? 0, spread: spreadLong ?? spec.floor,
-                                        n: nLong, residualSpread: residualSpread,
-                                        established: establishedLong)
+        let slopeUsable = !recentStep
+            && slopeIsUsable(slope: slope ?? 0, spread: spreadLong ?? spec.floor,
+                             n: slopePairs.count, residualSpread: residualSpread,
+                             established: establishedLong)
             && (tEpoch - lastLongNight) <= slopeHorizonDays
         let slopeValue = slope ?? 0
 
-        // CUSUM on residuals vs the live path (item 3), not vs a frozen flat median.
+        // CUSUM on nights the slow path does not explain. A usable slope is the drift; do not
+        // keep a CUSUM that piled up while the ramp was being fitted.
         var cusumS = carry.cusumS
         let entering = tEpoch - (Params.gapDays + 1)
-        if let liveCenter = carry.centerLong, let liveSpread = carry.spreadLong,
+        if slopeUsable {
+            cusumS = 0
+        } else if let liveCenter = carry.centerLong, let liveSpread = carry.spreadLong,
            epochStart.map({ entering >= $0 }) ?? true,
+           nightIsClean(entering, dayLogs: dayLogs),
            let x = trainableMath(byDay[entering], series: series) {
-            let exp = expectedOnPath(center: liveCenter, slope: carry.slopeLong ?? 0,
-                                     usable: carry.slopeUsable,
-                                     day: entering,
-                                     origin: carry.longOriginEpoch ?? origin,
-                                     lastNight: lastLongNight)
-            cusumS = cusumStep(previousS: cusumS, value: x, center: exp, spread: liveSpread)
+            cusumS = cusumStep(previousS: cusumS, value: x, center: liveCenter, spread: liveSpread)
         }
         let pChange = changeProbability(cusumS: cusumS)
         let regimeShift = pChange >= Params.pThr && !slopeUsable
@@ -1257,7 +1300,7 @@ public enum LongitudinalBaseline {
         var lambdas: [Double] = []
         var n7 = 0
         for e in weekEpochs {
-            if let x = trainableMath(byDay[e], series: series) {
+            if nightIsClean(e, dayLogs: dayLogs), let x = trainableMath(byDay[e], series: series) {
                 n7 += 1
                 var lambda = 1.0
                 if establishedLong, let c = centerLong, let s = spreadLong, s > 0 {
@@ -1463,6 +1506,7 @@ public enum LongitudinalBaseline {
             kBandTable: p.kBand, kBandUsed: kUsed,
             stableWindow: stableWindow(for: series),
             habitClass: habitToday, habitMatched: habitMatched,
+            nCleanLong: nLong,
             pChange: pChange, cusumS: cusumS, regimeShift: regimeShift,
             twoBlockShift: twoBlockShift, trimKeptFrac: trimKeptFrac,
             runLength: runLength, worse: worse, hits3: hits3, twoOfThree: twoOfThree,

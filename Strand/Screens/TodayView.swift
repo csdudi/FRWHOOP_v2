@@ -2315,9 +2315,8 @@ struct TodayView: View {
 
             DayLogTodayButton()
 
-            if store.usualsReady {
-                BaselineTodayPeek()
-            } else {
+            BaselineTodayPeek()
+            if !store.usualsReady {
                 synthesisCollapsible(d: d, score: score)
             }
 

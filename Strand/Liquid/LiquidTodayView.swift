@@ -1128,9 +1128,8 @@ struct LiquidTodayView: View {
 
             DayLogTodayButton(liquid: true)
 
-            if store.usualsReady {
-                BaselineTodayPeek(liquid: true)
-            } else {
+            BaselineTodayPeek(liquid: true)
+            if !store.usualsReady {
                 Button { withAnimation(.easeInOut(duration: 0.2)) { synthesisExpanded.toggle() } } label: {
                 card {
                     VStack(alignment: .leading, spacing: 8) {

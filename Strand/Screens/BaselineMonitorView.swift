@@ -26,8 +26,8 @@ struct BaselineMonitorView: View {
             topBackground: liquidScaffoldSky()
         ) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                WatchdogPlaceholderView(embedded: true)
                 monitorCard
-                watchdogFold
                 trendsFold
             }
         }
@@ -41,63 +41,74 @@ struct BaselineMonitorView: View {
         }
     }
 
+    private var usualsReady: Bool {
+        (store.evaluation?.show7 == true) || store.longCopyForPlot() != nil
+    }
+
     private var monitorCard: some View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                seriesHeader
-                SegmentedPillControl(BaselineStore.ContextFilter.allCases,
-                                     selection: Binding(
-                                        get: { store.context },
-                                        set: { store.selectContext($0, days: days) }
-                                     ),
-                                     adaptsToAvailableWidth: true) { $0.rawValue }
-                metricChips
-                BaselineCopyPlot(
-                    heading: "Short-term usual · this week",
-                    methodNote: "Day by day. Green band is this week’s usual. Last night is on the right; it is not folded into the usual.",
-                    boxTitle: "THIS WEEK",
-                    unit: store.series.planRow.unit,
-                    points: store.weekPoints,
-                    copy: store.evaluation?.copy7,
-                    show: store.evaluation?.show7 ?? false,
-                    trust: store.shortConfidence,
-                    howOff: store.shortHowOff,
-                    verdict: store.shortVerdict,
-                    yDomain: shortY,
-                    xTickStyle: .daily,
-                    navigator: .init(
-                        label: store.asOfLabel,
-                        atOldest: !store.canShift(-1, days: days),
-                        atNewest: !store.canShift(1, days: days),
-                        back: { store.shiftDay(-1, days: days) },
-                        forward: { store.shiftDay(1, days: days) }
+                Text("Long-term baseline")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                if usualsReady {
+                    seriesHeader
+                    SegmentedPillControl(BaselineStore.ContextFilter.allCases,
+                                         selection: Binding(
+                                            get: { store.context },
+                                            set: { store.selectContext($0, days: days) }
+                                         ),
+                                         adaptsToAvailableWidth: true) { $0.rawValue }
+                    metricChips
+                    BaselineCopyPlot(
+                        heading: "Short-term usual · this week",
+                        methodNote: "Day by day. Green band is this week’s usual. Last night is on the right; it is not folded into the usual.",
+                        boxTitle: "THIS WEEK",
+                        unit: store.series.planRow.unit,
+                        points: store.weekPoints,
+                        copy: store.evaluation?.copy7,
+                        show: store.evaluation?.show7 ?? false,
+                        trust: store.shortConfidence,
+                        howOff: store.shortHowOff,
+                        verdict: store.shortVerdict,
+                        yDomain: shortY,
+                        xTickStyle: .daily,
+                        navigator: .init(
+                            label: store.asOfLabel,
+                            atOldest: !store.canShift(-1, days: days),
+                            atNewest: !store.canShift(1, days: days),
+                            back: { store.shiftDay(-1, days: days) },
+                            forward: { store.shiftDay(1, days: days) }
+                        )
                     )
-                )
-                BaselineCopyPlot(
-                    heading: store.evaluation?.trial.card.slowTitle ?? "Longer usual",
-                    methodNote: store.evaluation?.slopeUsable == true
-                        ? "Longer usual may drift slowly. A short spike is not."
-                        : "Week by week. Each step rebuilds the 60-day median for that week.",
-                    boxTitle: store.longBoxTitle,
-                    unit: store.series.planRow.unit,
-                    points: store.longPoints,
-                    copy: store.longCopyForPlot(),
-                    show: store.longCopyForPlot() != nil,
-                    trust: store.longConfidence,
-                    howOff: nil,
-                    verdict: store.longVerdict,
-                    yDomain: longY,
-                    xTickStyle: .weekly,
-                    navigator: .init(
-                        label: store.longAsOfLabel,
-                        atOldest: !store.canShiftLongWeek(-1, days: days),
-                        atNewest: !store.canShiftLongWeek(1, days: days),
-                        back: { store.shiftLongWeek(-1, days: days) },
-                        forward: { store.shiftLongWeek(1, days: days) }
+                    BaselineCopyPlot(
+                        heading: store.evaluation?.trial.card.slowTitle ?? "Longer usual",
+                        methodNote: store.evaluation?.slopeUsable == true
+                            ? "Longer usual may drift slowly. A short spike is not."
+                            : "Week by week. Each step rebuilds the 60-day median for that week.",
+                        boxTitle: store.longBoxTitle,
+                        unit: store.series.planRow.unit,
+                        points: store.longPoints,
+                        copy: store.longCopyForPlot(),
+                        show: store.longCopyForPlot() != nil,
+                        trust: store.longConfidence,
+                        howOff: nil,
+                        verdict: store.longVerdict,
+                        yDomain: longY,
+                        xTickStyle: .weekly,
+                        navigator: .init(
+                            label: store.longAsOfLabel,
+                            atOldest: !store.canShiftLongWeek(-1, days: days),
+                            atNewest: !store.canShiftLongWeek(1, days: days),
+                            back: { store.shiftLongWeek(-1, days: days) },
+                            forward: { store.shiftLongWeek(1, days: days) }
+                        )
                     )
-                )
-                if store.evaluation?.trial.trialFreezeOk == true {
-                    trialBlock
+                    if store.evaluation?.trial.trialFreezeOk == true {
+                        trialBlock
+                    }
+                } else {
+                    notEnoughNightsBox
                 }
                 treatmentBridge
                 Text("Not a diagnosis. Demonstration series so the usuals can be read.")
@@ -108,18 +119,35 @@ struct BaselineMonitorView: View {
         }
     }
 
-    private var watchdogFold: some View {
-        baselineFold(
-            title: "Watchdog",
-            subtitle: "Watches nights that leave your usual. A later pass.",
-            symbol: "eye.trianglebadge.exclamationmark",
-            expanded: $store.watchdogExpanded
-        ) {
-            ComingSoon(
-                what: "Watchdog will watch nights that leave your usual without asking you to hunt for them.",
-                symbol: "eye.trianglebadge.exclamationmark"
-            )
+    private var notEnoughNightsBox: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "chart.line.uptrend.xyaxis")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.accent)
+                .frame(width: 22)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Not enough days yet")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text("There aren’t enough days to calculate the baseline yet.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
         }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
+                .fill(StrandPalette.surfaceInset.opacity(0.65))
+                .overlay(
+                    RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
+                        .strokeBorder(StrandPalette.hairline, lineWidth: 1)
+                )
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("There aren’t enough days to calculate the baseline yet")
     }
 
     private var trendsFold: some View {
@@ -191,6 +219,10 @@ struct BaselineMonitorView: View {
                 .foregroundStyle(StrandPalette.textPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
+            Text(store.quietRangeCaption)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
             if store.isExploratory(store.series) {
                 Text("EXPLORATORY")
                     .font(StrandFont.caption.weight(.semibold))
@@ -883,7 +915,7 @@ struct BaselineTodayPeek: View {
                     .frame(width: 22)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("BASELINE")
+                    Text("LIVE BASELINE")
                         .font(StrandFont.overline)
                         .tracking(1.4)
                         .foregroundStyle(StrandPalette.textSecondary)
@@ -891,6 +923,9 @@ struct BaselineTodayPeek: View {
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
+                    Text("Open for right now and your usuals.")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
                 }
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right")
@@ -903,7 +938,7 @@ struct BaselineTodayPeek: View {
             .background(surface)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Open Baseline")
+        .accessibilityLabel("Open live baseline")
         .onAppear {
             let tape = days
             if store.evaluation == nil, let last = tape.last?.day {
