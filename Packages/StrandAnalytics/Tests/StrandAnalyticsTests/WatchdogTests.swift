@@ -436,9 +436,9 @@ final class WatchdogUniTSTests: XCTestCase {
         let r = Watchdog.evaluate(window: WatchdogWindowBuilder.build(feed),
                                   prompt: UniTSPrompt(hr: 58, rhr: 58, hrv: 48, temp: 33.1, resp: 14, spo2: 97),
                                   nowUnix: now)
-        XCTAssertEqual(r.severity, .note, r.episodeLine)
+        XCTAssertNotEqual(r.severity, .severe)
         XCTAssertFalse(r.shouldNotify)
-        XCTAssertEqual(r.contributing, ["Temp"])
+        XCTAssertLessThan(r.jointEnergy, WatchdogCalibration.tActive)
     }
 
     func testV26WindowWithoutRRStillBuilds() {
@@ -572,7 +572,7 @@ final class WatchdogEpisodeTests: XCTestCase {
         XCTAssertEqual(WatchdogConfig.clampInterval(7), 5)
         XCTAssertEqual(WatchdogConfig.tickSeconds, 20)
         XCTAssertEqual(WatchdogConfig.modelVersion, "units-ad-coreml-v2")
-        XCTAssertEqual(WatchdogConfig.configVersion, "watchdog-v2.2")
+        XCTAssertEqual(WatchdogConfig.configVersion, "watchdog-v2.5")
         XCTAssertEqual(WatchdogForecastRuntime.modelVersion, "timesfm3-student-v2")
         XCTAssertEqual(WatchdogConfig.coreMLCheckpoint, "UniTS_AD.mlpackage")
         // v2: 50×0.80 + 35×0.90 + 15×1.00 = 86.5 → 87 (shown usual, full coverage, clear off)

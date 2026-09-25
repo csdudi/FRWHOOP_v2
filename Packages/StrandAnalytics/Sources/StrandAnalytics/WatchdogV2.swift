@@ -3,7 +3,7 @@ import WhoopProtocol
 
 /// v2 calibration. Quiet-window residual coverage, not this-window scatter. Engineering, not clinical.
 public enum WatchdogCalibration: Sendable {
-    public static let version = "cal-v1"
+    public static let version = "prior-untuned"
     public static let quietCoverage = 0.95
     public static let coldStartGain = 2.5
     public static let tNote = 1.0
@@ -208,41 +208,48 @@ public enum WatchdogAdaptive: Sendable {
         out.rangeHalf[.temp] = out.scaleTemp.last ?? residual.rangeHalf(for: .temp)
         out.rangeHalf[.resp] = out.scaleResp.last ?? residual.rangeHalf(for: .resp)
         out.rangeHalf[.spo2] = out.scaleSpO2.last ?? residual.rangeHalf(for: .spo2)
-        var joint = WatchdogScores.joint(energies: [
-            energy[.hr] ?? 0, energy[.rhr] ?? 0, energy[.hrv] ?? 0,
-            energy[.temp] ?? 0, energy[.resp] ?? 0, energy[.spo2] ?? 0
-        ])
-        if artifact { joint *= 0.72 }
-        out.jointEnergy = joint
+        var dummy = Array(repeating: 0.0, count: 6)
+        let raw: [Double?] = [
+            energy[.hr], energy[.rhr], energy[.hrv], energy[.temp], energy[.resp], energy[.spo2]
+        ]
+        let dir = WatchdogDirection.compute(rawR: raw, rhrAllowed: still,
+                                            artifact: artifact, dirEma: &dummy)
+        out.jointEnergy = dir.joint
         return out
     }
 }
 
 public enum WatchdogScores: Sendable {
+    /// Unsigned RMS of present energies. Not `max`. Prefer `WatchdogDirection` for live joint.
     public static func joint(energies: [Double]) -> Double {
         let xs = energies.filter { $0.isFinite }
         guard !xs.isEmpty else { return 0 }
-        let l2 = sqrt(xs.reduce(0) { $0 + $1 * $1 }) / sqrt(Double(xs.count))
-        let mx = xs.max() ?? 0
-        return max(l2, mx)
+        return sqrt(xs.reduce(0) { $0 + $1 * $1 } / Double(xs.count))
     }
 
     public static func fused(recon: Double, forecast: Double) -> Double {
-        max(recon, WatchdogCalibration.forecastAlpha * max(0, forecast))
+        recon
+    }
+
+    public static func severity(recon: Double, forecast: Double = 0, persistTicks: Int, safety: Bool,
+                                confounded: Bool, personalOff: Bool) -> WatchdogSeverity {
+        if safety { return .severe }
+        if confounded {
+            return recon >= WatchdogCalibration.tNote ? .candidate : .note
+        }
+        let persist = persistTicks >= WatchdogCalibration.persistTicks
+        if recon >= WatchdogCalibration.tSevere && persist { return .severe }
+        if recon >= WatchdogCalibration.tActive && persist { return .active }
+        if recon >= WatchdogCalibration.tNote && persist { return .candidate }
+        if recon >= WatchdogCalibration.tNote || personalOff { return .note }
+        _ = forecast
+        return .withinLimits
     }
 
     public static func severity(fused: Double, persistTicks: Int, safety: Bool, confounded: Bool,
                                 personalOff: Bool) -> WatchdogSeverity {
-        if safety { return .severe }
-        if confounded {
-            return fused >= WatchdogCalibration.tNote ? .candidate : .note
-        }
-        let persist = persistTicks >= WatchdogCalibration.persistTicks
-        if fused >= WatchdogCalibration.tSevere && persist { return .severe }
-        if fused >= WatchdogCalibration.tActive && persist { return .active }
-        if fused >= WatchdogCalibration.tNote && persist { return .candidate }
-        if fused >= WatchdogCalibration.tNote || personalOff { return .note }
-        return .withinLimits
+        severity(recon: fused, persistTicks: persistTicks, safety: safety,
+                 confounded: confounded, personalOff: personalOff)
     }
 
     public static func shouldNotify(severity: WatchdogSeverity, openedEpisode: Bool,
@@ -255,18 +262,35 @@ public enum WatchdogScores: Sendable {
     }
 }
 
-/// Episode notify (item 7). No wall-clock 1800 s mute.
-/// Escalate follows reconstruction J, not forecast skill (Lane B must not re-page a stable recon).
+/// Wearer push: **extreme only**. Daily event testing over-sent when every cut / Early / Test
+/// Centre bell felt like a page. Forecast, workouts, and in-range events never notify.
 public enum WatchdogNotifyPolicy: Sendable {
+    public static func extremeFamily(_ label: WatchdogEventLabel) -> Bool {
+        switch label {
+        case .safetyBound, .abnormalStillTachycardia, .abnormalMultiDirection, .abnormalSpo2Still:
+            return true
+        default:
+            return false
+        }
+    }
+
     public static func decision(severity: WatchdogSeverity, openedEpisode: Bool,
                                 safety: Bool, previousSafety: Bool,
                                 fused: Double, previousFused: Double,
-                                recon: Double = 0, previousRecon: Double = 0) -> (Bool, String) {
-        guard severity == .severe else { return (false, "not-severe") }
-        if openedEpisode { return (true, "episode-start") }
-        if safety && !previousSafety { return (true, "safety") }
-        let prior = previousRecon
-        if recon >= prior + WatchdogCalibration.escalateDelta { return (true, "escalate") }
+                                recon: Double = 0, previousRecon: Double = 0,
+                                eventLabel: WatchdogEventLabel = .abnormalMultiDirection) -> (Bool, String) {
+        _ = fused
+        _ = previousFused
+        let safetyEdge = safety && !previousSafety
+        guard severity == .severe || safetyEdge else { return (false, "not-severe") }
+        if openedEpisode && (extremeFamily(eventLabel) || safetyEdge) {
+            return (true, "episode-start")
+        }
+        if safetyEdge { return (true, "safety") }
+        guard extremeFamily(eventLabel) else { return (false, "not-extreme-family") }
+        if recon >= previousRecon + WatchdogCalibration.escalateDelta {
+            return (true, "escalate")
+        }
         return (false, "stable-episode")
     }
 }

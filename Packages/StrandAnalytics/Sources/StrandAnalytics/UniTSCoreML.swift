@@ -17,7 +17,7 @@ final class UniTSCoreMLSession: @unchecked Sendable {
     }
 
     func predict(occupancy: [Double], prompt: [Double], personalScale: [Double],
-                 observed: [[Double]]) -> (hat: [[Double]], sigma: [[Double]])? {
+                 observed: [[Double]], activity: [[Double]] = []) -> (hat: [[Double]], sigma: [[Double]])? {
         lock.lock()
         defer { lock.unlock() }
         guard let model = loadIfNeeded() else { return nil }
@@ -26,12 +26,16 @@ final class UniTSCoreMLSession: @unchecked Sendable {
             let pr = try Self.vector(prompt, shape: [1, 6])
             let sc = try Self.vector(personalScale, shape: [1, 6])
             let obs = try Self.cube(observed, channels: 6, seq: WatchdogConfig.seqLen)
-            let input = try MLDictionaryFeatureProvider(dictionary: [
+            var dict: [String: MLFeatureValue] = [
                 "occupancy": MLFeatureValue(multiArray: occ),
                 "prompt": MLFeatureValue(multiArray: pr),
                 "personal_scale": MLFeatureValue(multiArray: sc),
                 "observed": MLFeatureValue(multiArray: obs)
-            ])
+            ]
+            if !activity.isEmpty, let act = try? Self.timeFeatures(activity) {
+                dict["activity"] = MLFeatureValue(multiArray: act)
+            }
+            let input = try MLDictionaryFeatureProvider(dictionary: dict)
             let out = try model.prediction(from: input)
             guard let hatArr = out.featureValue(for: "hat")?.multiArrayValue,
                   let sigArr = out.featureValue(for: "sigma")?.multiArrayValue else { return nil }
@@ -82,6 +86,20 @@ final class UniTSCoreMLSession: @unchecked Sendable {
         let n = xs.count
         for i in 0..<n {
             arr[i] = NSNumber(value: Float(xs[i]))
+        }
+        return arr
+    }
+
+    static func timeFeatures(_ rows: [[Double]]) throws -> MLMultiArray {
+        let seq = WatchdogConfig.seqLen
+        let f = WatchdogConfig.activityFeatureWidth
+        let arr = try MLMultiArray(shape: [1, NSNumber(value: seq), NSNumber(value: f)], dataType: .float32)
+        for t in 0..<seq {
+            let row = t < rows.count ? rows[t] : []
+            for k in 0..<f {
+                let v = k < row.count ? row[k] : 0
+                arr[[0, t, k] as [NSNumber]] = NSNumber(value: Float(v))
+            }
         }
         return arr
     }

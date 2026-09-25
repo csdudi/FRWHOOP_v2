@@ -259,6 +259,12 @@ struct TestCentreView: View {
                     .foregroundStyle(StrandPalette.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(model.baseline.watchdogResult?.qualityLine ?? "Interval \(model.baseline.liveIntervalMinutes) min")
+                if let r = model.baseline.watchdogResult, !r.directionMarks.isEmpty {
+                    Text("Dir \(zip(WatchdogDirection.names, r.directionMarks).map { "\($0) \($1)" }.joined(separator: " · ")) · J \(String(format: "%.2f", r.jointEnergy)) · Fc \(String(format: "%.2f", r.forecastEnergy)) · \(r.eventLabel) · cut \(r.cutReason) · \(r.eventExplained ? "explained" : "unexplained") · \(r.calibrationSource)")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                 HStack(spacing: NoopMetrics.space3) {

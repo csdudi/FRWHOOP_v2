@@ -17,9 +17,12 @@ FRWHOOP_v2 has **no Node backend**. Nightly math runs in this package. Hosted `s
 | [FRWHOOP_BASELINE_FINAL_PLAN.md](FRWHOOP_BASELINE_FINAL_PLAN.md) | Source evaluation |
 | [FRWHOOP_BASELINE_CHANGE_SUMMARY_16_SEP.md](FRWHOOP_BASELINE_CHANGE_SUMMARY_16_SEP.md) | 16 Sep: eight review items + same-day follow-ups |
 | [FRWHOOP_BASELINE_CHANGE_SUMMARY_17_SEP.md](FRWHOOP_BASELINE_CHANGE_SUMMARY_17_SEP.md) | 17 Sep work list: NARA Baseline V1 (daily log, habit stratum, iPhone shell) |
-| [../../docs/FRWHOOP_WATCHDOG_HOW_IT_WORKS.md](../../docs/FRWHOOP_WATCHDOG_HOW_IT_WORKS.md) | Short map of live Watchdog + Layer 1 Baseline |
+| [../../docs/FRWHOOP_LAYER1_BASELINE_HOW_IT_WORKS.md](../../docs/FRWHOOP_LAYER1_BASELINE_HOW_IT_WORKS.md) | Short colleague map: long-term Layer 1 Baseline |
+| [../../docs/FRWHOOP_WATCHDOG_LIVE_BASELINE_HOW_IT_WORKS.md](../../docs/FRWHOOP_WATCHDOG_LIVE_BASELINE_HOW_IT_WORKS.md) | Short colleague map: live Watchdog Baseline |
+| [../../docs/FRWHOOP_WATCHDOG_HOW_IT_WORKS.md](../../docs/FRWHOOP_WATCHDOG_HOW_IT_WORKS.md) | Older short map (v2.2; prefer the two files above) |
 | [FRWHOOP_WATCHDOG.md](FRWHOOP_WATCHDOG.md) | Watchdog product contract (`watchdog-v2.2`, UniTS-AD + TimesFM student) |
 | [FRWHOOP_WATCHDOG_NEXT_21_SEP_2026.md](FRWHOOP_WATCHDOG_NEXT_21_SEP_2026.md) | Twelve review items as shipped |
+| [FRWHOOP_WATCHDOG_NEXT_24_SEP_2026.md](FRWHOOP_WATCHDOG_NEXT_24_SEP_2026.md) | 24 Sep: most dynamic; v2.5 self-label (no human events) |
 | [units/](units/) | Frozen Core ML pins, `WatchdogConfig.json`, calibration |
 | [fixtures/](fixtures/) | Synthetic daily tapes for tests (added with phase A code) |
 

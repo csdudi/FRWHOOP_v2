@@ -1,0 +1,15 @@
+{
+  "catalog_version": "tune-catalog-v1-selflabel",
+  "calibration_source": "prior-untuned",
+  "note": "No human event labels. Replay Watchdog.evaluate; names come from UniTS/TimesFM + WatchdogEventMemory. mixed_rejected is only a crossed-cut window, never a reviewer action. Do not invent clinical events from a personal night. real_whoop5 remains not_run.",
+  "label_source": "watchdog-v2.5-selflabel",
+  "human_review": "forbidden",
+  "real_whoop5": "not_run",
+  "labels": [
+    "wrist_off", "gap", "artifact_spike",
+    "workout_walk", "workout_run", "workout_cycle", "workout_lift",
+    "post_workout", "normal_sleep", "normal_still_awake",
+    "forecast_drift_only", "abnormal_still_tachycardia",
+    "abnormal_multi_direction", "abnormal_spo2_still", "safety_bound"
+  ]
+}

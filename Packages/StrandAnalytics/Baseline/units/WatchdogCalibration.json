@@ -1,5 +1,5 @@
 {
-  "version": "cal-v1",
+  "version": "prior-untuned",
   "quiet_coverage": 0.95,
   "cold_start_gain": 2.5,
   "thresholds": {

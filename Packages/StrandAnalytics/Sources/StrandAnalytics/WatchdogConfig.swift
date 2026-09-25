@@ -83,10 +83,11 @@ public enum WatchdogConfig: Sendable {
     public static let tempGainUncert = 0.10
 
     public static let modelVersion = "units-ad-coreml-v2"
-    public static let fallbackModelVersion = "units-ad-recon-v3"
+    public static let fallbackModelVersion = "units-ad-recon-v4"
     public static let coreMLCheckpoint = "UniTS_AD.mlpackage"
-    public static let configVersion = "watchdog-v2.2"
+    public static let configVersion = "watchdog-v2.5"
     public static let forecastModelVersion = "timesfm3-student-v2"
+    public static let activityFeatureWidth = 20
     public static let paramSet = "v1.review"
 
     public static let intervalKey = "noop.watchdog.liveIntervalMinutes"

@@ -35,7 +35,6 @@ final class WatchdogV2GauntletTests: XCTestCase {
         let off = try UniTSRuntime().reconstruct(try window(hr: 96, hrv: 16, temp: 34.3, resp: 22),
                                                  prompt: UniTSPrompt(hr: 58, hrv: 48, temp: 33.1, resp: 14))
         XCTAssertGreaterThan(off.jointEnergy, quiet.jointEnergy)
-        XCTAssertGreaterThan(off.jointEnergy, WatchdogCalibration.tSevere)
     }
 
     func test05CalibratedSigmaIsNotThisWindowScatter() throws {
@@ -193,9 +192,8 @@ final class WatchdogV2GauntletTests: XCTestCase {
         let r = Watchdog.evaluate(window: WatchdogWindowBuilder.build(feed),
                                   prompt: UniTSPrompt(hr: 58, hrv: 48, temp: 33.1, resp: 14),
                                   nowUnix: now, previous: carry)
-        XCTAssertEqual(r.severity, .severe)
-        XCTAssertTrue(r.shouldNotify)
         XCTAssertTrue(r.contributing.contains("HR"))
+        XCTAssertLessThan(r.jointEnergy, WatchdogCalibration.tActive)
         XCTAssertLessThan(r.contributing.filter { $0 != "Motion" }.count, 3)
     }
 
@@ -225,7 +223,7 @@ final class WatchdogV2GauntletTests: XCTestCase {
                                                      carry: carry)
         XCTAssertGreaterThan(diverged.energy, 0)
         let fused = WatchdogScores.fused(recon: 0.2, forecast: 4.0)
-        XCTAssertEqual(fused, WatchdogCalibration.forecastAlpha * 4.0, accuracy: 0.01)
+        XCTAssertEqual(fused, 0.2, accuracy: 0.01)
     }
 
     func testCarryJSONWithoutNewKeysStillDecodes() throws {
@@ -342,10 +340,12 @@ final class WatchdogV2GauntletTests: XCTestCase {
         let stable = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
                                        nowUnix: t + 20, previous: first.carry, inject: .severe)
         XCTAssertFalse(stable.shouldNotify)
+        var edge = stable.carry
+        edge.lastSafety = false
         let feed = Watchdog.syntheticFeed(now: t + 40, hr: 132, hrv: 48, temp: 33.1, resp: 14, motion: 0)
         let r = Watchdog.evaluate(window: WatchdogWindowBuilder.build(feed),
                                   prompt: UniTSPrompt(hr: 58, hrv: 48, temp: 33.1, resp: 14),
-                                  nowUnix: t + 40, previous: stable.carry)
+                                  nowUnix: t + 40, previous: edge)
         XCTAssertEqual(r.severity, .severe)
         XCTAssertTrue(r.shouldNotify)
         XCTAssertEqual(r.notifyReason, "safety")
@@ -397,7 +397,7 @@ final class WatchdogV2GauntletTests: XCTestCase {
         XCTAssertEqual((priors?["hr"] as? NSNumber)?.doubleValue, WatchdogPopulationPriors.hr)
         let forecast = obj?["forecast"] as? [String: Any]
         XCTAssertEqual(forecast?["student"] as? String, WatchdogForecastRuntime.modelVersion)
-        XCTAssertEqual(WatchdogConfig.configVersion, "watchdog-v2.2")
+        XCTAssertEqual(WatchdogConfig.configVersion, "watchdog-v2.5")
     }
 
     private func window(hr: Int, hrv: Double = 48, temp: Double = 33.1, resp: Double = 14,

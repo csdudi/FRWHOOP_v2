@@ -67,6 +67,14 @@ struct WatchdogPlaceholderView: View {
                     .font(StrandFont.caption.weight(.semibold))
                     .tracking(0.6)
                     .foregroundStyle(snapshot.isLive ? StrandPalette.statusPositive : StrandPalette.textSecondary)
+                if snapshot.isLive, snapshot.earlyFlag {
+                    Text("·")
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .accessibilityHidden(true)
+                    Text("Early")
+                        .font(StrandFont.caption.weight(.semibold))
+                        .foregroundStyle(StrandPalette.textSecondary)
+                }
                 if snapshot.isLive, snapshot.activityDetail != "Context unknown" {
                     Text("·")
                         .foregroundStyle(StrandPalette.textTertiary)
@@ -373,6 +381,7 @@ private struct WatchdogLiveSnapshot {
     let trustPct: Int?
     let trustCaption: String?
     let activityDetail: String
+    let earlyFlag: Bool
     let sigmaAdaptive: Bool
     let metrics: [MetricRow]
 
@@ -386,6 +395,7 @@ private struct WatchdogLiveSnapshot {
             trustPct = result.unavailable == nil ? result.trustPct : nil
             trustCaption = Self.trustCaption(result)
             activityDetail = result.activityDetail
+            earlyFlag = result.earlyFlag && result.trustPct >= 35
             sigmaAdaptive = result.sigmaAdaptive
             let hr = result.signals.first(where: { $0.name == "HR" })
             let rhr = result.signals.first(where: { $0.name == "RHR" })
@@ -425,6 +435,7 @@ private struct WatchdogLiveSnapshot {
         trustCaption = "Usual is still being learned."
         headline = "Waiting on this half-hour"
         activityDetail = "Context unknown"
+        earlyFlag = false
         sigmaAdaptive = false
         let whoop5 = WhoopModel.persisted == .whoop5mg
         metrics = [
@@ -563,6 +574,9 @@ private struct WatchdogLiveSnapshot {
     }
 
     static func headline(_ result: WatchdogResult) -> String {
+        if result.earlyFlag && result.severity != .severe && result.severity != .active {
+            return "Leaving the expected path"
+        }
         if let reason = result.unavailable {
             switch reason {
             case .wristOff: return "Strap off"

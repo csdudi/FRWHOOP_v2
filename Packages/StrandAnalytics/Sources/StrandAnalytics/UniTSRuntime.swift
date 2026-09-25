@@ -161,15 +161,18 @@ public struct UniTSRuntime: Sendable {
     public init() {}
 
     public func reconstruct(_ window: WatchdogWindow, prompt: UniTSPrompt) throws -> UniTSResidual {
+        let features = WatchdogActivityFeatures.build(window: window)
         let occ = Self.occupancy(window)
-        if let residual = Self.coreMLResidual(window: window, prompt: prompt, occupancy: occ) {
+        if let residual = Self.coreMLResidual(window: window, prompt: prompt,
+                                              occupancy: occ, activity: features) {
             return residual
         }
         return Self.priorResidual(window: window, prompt: prompt, occupancy: occ)
     }
 
     /// Core ML UniTS-AD checkpoint: both \(\hat{x}\) and \(\sigma\) come from one inference.
-    static func coreMLResidual(window: WatchdogWindow, prompt: UniTSPrompt, occupancy: [Double]) -> UniTSResidual? {
+    static func coreMLResidual(window: WatchdogWindow, prompt: UniTSPrompt, occupancy: [Double],
+                               activity: [[Double]] = []) -> UniTSResidual? {
         let bases = resolvedBases(window: window, prompt: prompt)
         let personal = [prompt.scaleHR, prompt.scaleRHR, prompt.scaleHRV,
                         prompt.scaleTemp, prompt.scaleResp, prompt.scaleSpO2]
@@ -178,12 +181,14 @@ public struct UniTSRuntime: Sendable {
             occ.append(contentsOf: Array(repeating: occ.last ?? 0, count: WatchdogConfig.seqLen - occ.count))
         }
         if occ.count > WatchdogConfig.seqLen { occ = Array(occ.prefix(WatchdogConfig.seqLen)) }
-        guard let pred = UniTSCoreMLSession.shared.predict(
+        let pred = UniTSCoreMLSession.shared.predict(
             occupancy: occ,
             prompt: bases.map { $0 ?? 0 },
             personalScale: personal,
-            observed: packObserved(window, bases: bases)
-        ) else { return nil }
+            observed: packObserved(window, bases: bases),
+            activity: activity
+        )
+        guard let pred else { return nil }
         func hat(_ channel: Int, valid: Bool) -> [Double?] {
             guard valid, channel < pred.hat.count else {
                 return Array(repeating: nil, count: WatchdogConfig.seqLen)
