@@ -1,57 +1,8 @@
-<p align="center">
-  <img src="docs/assets/logo-v3.png" alt="FRWHOOP" width="72">
-</p>
+# FRWHOOP
 
-<h1 align="center">FRWHOOP</h1>
+**This repository is for personal baselines.** On-device usuals across nights, plus a live half-hour on the same Baseline tab. Not a diagnosis.
 
-<p align="center"><b>This repository is for personal baselines.</b></p>
-
-<p align="center">On-device usuals across nights, plus a live half-hour on the same Baseline tab. Not a diagnosis.</p>
-
-<p align="center">
-  <a href="#what-this-repo-is-for">What this is for</a> ·
-  <a href="#the-baselines">The baselines</a> ·
-  <a href="docs/baselines/README.md">How they work</a> ·
-  <a href="#download">Build</a>
-</p>
-
-<p align="center">
-  <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Android%20%C2%B7%20iOS-E8B84B?style=flat-square">
-  <img alt="Local first" src="https://img.shields.io/badge/local-first-E8B84B?style=flat-square">
-  <img alt="Account free" src="https://img.shields.io/badge/account-free-C8902F?style=flat-square">
-  <img alt="WHOOP 4 and 5" src="https://img.shields.io/badge/works%20with-WHOOP%204.0%20%26%205.0-6B737B?style=flat-square">
-  <a href="LICENSE"><img alt="License: PolyForm Noncommercial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-6B737B?style=flat-square"></a>
-  <a href="https://www.reddit.com/r/NoopBand/"><img alt="Community: r/NoopBand" src="https://img.shields.io/badge/community-r%2FNoopBand-E8B84B?style=flat-square&logo=reddit&logoColor=white"></a>
-  <a href="https://discord.com/invite/wKgyqVdjrP"><img alt="Chat: Discord" src="https://img.shields.io/badge/chat-Discord-5865F2?style=flat-square&logo=discord&logoColor=white"></a>
-</p>
-
-<p align="center">
-  <a href="https://github.com/ryanbr/noop/releases/latest"><img alt="Latest release" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fryanbr%2Fnoop%2Fmain%2Fdocs%2Fstats%2Frelease.json&style=flat-square"></a>
-  <a href="https://github.com/ryanbr/noop/stargazers"><img alt="Stars" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fryanbr%2Fnoop%2Fmain%2Fdocs%2Fstats%2Fstars.json&style=flat-square"></a>
-</p>
-
-<p align="center">
-  <a href="#download">⬇&nbsp;Download</a> ·
-  <a href="https://github.com/ryanbr/noop/wiki/FAQ">❓&nbsp;FAQ</a> ·
-  <a href="https://discord.com/invite/wKgyqVdjrP">💬&nbsp;Discord</a> ·
-  <a href="https://www.reddit.com/r/NoopBand/">👽&nbsp;Reddit</a> ·
-  <a href="#features">Features</a> ·
-  <a href="docs/PROTOCOL.md">Protocol</a> ·
-  <a href="docs/RAW_DATA_CAPTURE.md">Raw data capture</a> ·
-</p>
-
-<p align="center">
-  <a href="https://github.com/ryanbr/noop/releases/latest"><img src="docs/assets/hero-v8.jpg" alt="NOOP in the new Liquid Metal design, on iPhone, Mac and Android" width="820"></a>
-</p>
-
-<p align="center">
-  <img src="docs/assets/shot-ios-today.png" alt="Today on iPhone" width="218">
-  &nbsp;&nbsp;
-  <img src="docs/assets/shot-android-today.png" alt="Today on Android" width="218">
-  &nbsp;&nbsp;
-  <img src="docs/assets/shot-android-trend.png" alt="A metric's own trend on Android" width="218">
-</p>
-<p align="center"><sub>The all-new <b>Liquid Metal</b> look: living liquid scores, a sky that moves with your day, rebuilt on every screen. The same Today on iPhone and Android, and a metric&rsquo;s own trend. One design across iPhone, Android &amp; Mac.</sub></p>
+[What this is for](#what-this-repo-is-for) · [The baselines](#the-baselines) · [How they work](docs/baselines/README.md)
 
 ---
 
@@ -706,3 +657,45 @@ FRWHOOP is **built off the existing [NOOP](https://github.com/ryanbr/NOOP) codeb
 This repository does not replace NOOP. It adds the **Baseline** tab — long-term usuals and the live half-hour — on top of that stack. Charge was not rewritten.
 
 License and notices stay with NOOP: [`LICENSE`](LICENSE), [`ATTRIBUTION.md`](ATTRIBUTION.md), [`DISCLAIMER.md`](DISCLAIMER.md). Not affiliated with WHOOP.
+
+<p align="center">
+  <img src="docs/assets/logo-v3.png" alt="NOOP" width="72">
+</p>
+
+<p align="center">
+  <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Android%20%C2%B7%20iOS-E8B84B?style=flat-square">
+  <img alt="Local first" src="https://img.shields.io/badge/local-first-E8B84B?style=flat-square">
+  <img alt="Account free" src="https://img.shields.io/badge/account-free-C8902F?style=flat-square">
+  <img alt="WHOOP 4 and 5" src="https://img.shields.io/badge/works%20with-WHOOP%204.0%20%26%205.0-6B737B?style=flat-square">
+  <a href="LICENSE"><img alt="License: PolyForm Noncommercial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-6B737B?style=flat-square"></a>
+  <a href="https://www.reddit.com/r/NoopBand/"><img alt="Community: r/NoopBand" src="https://img.shields.io/badge/community-r%2FNoopBand-E8B84B?style=flat-square&logo=reddit&logoColor=white"></a>
+  <a href="https://discord.com/invite/wKgyqVdjrP"><img alt="Chat: Discord" src="https://img.shields.io/badge/chat-Discord-5865F2?style=flat-square&logo=discord&logoColor=white"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ryanbr/noop/releases/latest"><img alt="Latest release" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fryanbr%2Fnoop%2Fmain%2Fdocs%2Fstats%2Frelease.json&style=flat-square"></a>
+  <a href="https://github.com/ryanbr/noop/stargazers"><img alt="Stars" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fryanbr%2Fnoop%2Fmain%2Fdocs%2Fstats%2Fstars.json&style=flat-square"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ryanbr/noop">NOOP</a> ·
+  <a href="https://github.com/ryanbr/noop/releases/latest">Download</a> ·
+  <a href="https://github.com/ryanbr/noop/wiki/FAQ">FAQ</a> ·
+  <a href="https://discord.com/invite/wKgyqVdjrP">Discord</a> ·
+  <a href="https://www.reddit.com/r/NoopBand/">Reddit</a> ·
+  <a href="docs/PROTOCOL.md">Protocol</a> ·
+  <a href="docs/RAW_DATA_CAPTURE.md">Raw data capture</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ryanbr/noop/releases/latest"><img src="docs/assets/hero-v8.jpg" alt="NOOP in the Liquid Metal design, on iPhone, Mac and Android" width="820"></a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/shot-ios-today.png" alt="Today on iPhone" width="218">
+  &nbsp;&nbsp;
+  <img src="docs/assets/shot-android-today.png" alt="Today on Android" width="218">
+  &nbsp;&nbsp;
+  <img src="docs/assets/shot-android-trend.png" alt="A metric's own trend on Android" width="218">
+</p>
+<p align="center"><sub>NOOP’s Liquid Metal look across iPhone, Android, and Mac. The same Today and trends this fork still ships.</sub></p>
