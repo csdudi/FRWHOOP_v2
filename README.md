@@ -4,13 +4,15 @@
 
 <h1 align="center">FRWHOOP</h1>
 
-<p align="center"><b>Your usual over nights, and a live half-hour on the same Baseline tab — on-device.</b></p>
+<p align="center"><b>This repository is for personal baselines.</b></p>
+
+<p align="center">On-device usuals across nights, plus a live half-hour on the same Baseline tab. Not a diagnosis.</p>
 
 <p align="center">
-  <a href="#based-on-noop">Based on NOOP</a> ·
-  <a href="#baseline-and-live-baseline">Baseline</a> ·
-  <a href="docs/baselines/README.md">How the baselines work</a> ·
-  <a href="#download">Download / build</a>
+  <a href="#what-this-repo-is-for">What this is for</a> ·
+  <a href="#the-baselines">The baselines</a> ·
+  <a href="docs/baselines/README.md">How they work</a> ·
+  <a href="#download">Build</a>
 </p>
 
 <p align="center">
@@ -53,43 +55,55 @@
 
 ---
 
-## Based on NOOP
+## What this repo is for
 
-**FRWHOOP is based on the existing [NOOP](https://github.com/ryanbr/NOOP) codebase** (Ryan / the NOOP community): BLE to a strap you own, on-device SQLite, Charge / Effort / Rest, sleep, workouts, and the Liquid Metal apps for Mac, iPhone, and Android.
+FRWHOOP exists to compute **your baselines on the phone**, from the strap you already wear.
 
-This repository does not replace that stack. It adds a **Baseline** product on top of it. Pairing, history import, Today, and Charge still come from NOOP. We did not rewrite Charge.
+It is not a new recovery score. It is not a cloud model. It is two separate on-device baselines on one **Baseline** tab:
 
-Full credit: [`ATTRIBUTION.md`](ATTRIBUTION.md) and [NOOP’s license](LICENSE). Not affiliated with WHOOP.
+1. **Long-term baseline** — what is usual for you across nights.
+2. **Live baseline** — whether the last 30 minutes look like you.
+
+They never share one number. They never average each other. The live path may read a shown long-term usual; it never writes that usual. Neither path guesses a treatment start from heart rate or names a drug.
+
+How they work in more detail: [`docs/baselines/`](docs/baselines/README.md).
 
 ---
 
-## Baseline and live baseline
-
-What this fork added is two on-device baselines on one **Baseline** tab. They answer different questions and never share a score.
+## The baselines
 
 ### Long-term baseline (Layer 1)
 
-**What is usual for this person across nights?**
+**Question:** what is usual for this person across days and nights?
 
-Each biometric is scored twice — a **7-day** copy and a **60-day** copy — and those two usuals are **never averaged**. Tonight is not in either window. A series only shows after enough real nights. **TRUST** is how much that usual may judge tonight; under 35% the card stays quiet.
+Every biometric that has enough nights gets **two copies**, never mixed:
 
-If you log a treatment start, Layer 1 can freeze the path from *before* that clock time. It never infers a start from heart rate and never names a drug.
+| Copy | Window | Role |
+|---|---|---|
+| **7-day** | Last 7 completed days — **not tonight** | Recent level |
+| **60-day** | About two months, with a gap so last week is not in the long copy | Longer core |
 
-[How Layer 1 works](docs/baselines/LAYER1.md) · engine: `LongitudinalBaseline.swift`
+A series only **shows** after enough real nights (a few for the week copy; more for the long copy). **TRUST** is how much that usual is allowed to judge tonight. Under 35%, HOW OFF stays hidden.
+
+If you **log** a treatment start, Layer 1 can freeze the path from before that clock time and compare later nights to it. It does not infer that start from HR.
+
+Code: `LongitudinalBaseline.swift` · [full note](docs/baselines/LAYER1.md)
 
 ### Live baseline (Watchdog)
 
-**Did the last 30 minutes look like this person?**
+**Question:** did the last half-hour look like this person?
 
-The first card on Baseline is the live half-hour: pulse, still HR, HRV, wrist temp, breathing, SpO₂. A predicted range is drawn only on minutes that were recorded. The live path may **read** a shown Layer 1 usual as a prompt. It **never writes** Layer 1.
+The top of the Baseline tab is the live card: heart rate, still HR, HRV, wrist temp, breathing, SpO₂. Each row is the live value against a **predicted range** for that half-hour. Empty minutes stay empty (a dash). Wrist-off is **unavailable**, not “recovered.”
 
-**TRUST** on that card is how much to believe this stretch’s in-range / off call. Below 35% the UI stays in learning and will not call a reading off. Wrist-off is unavailable, not recovered. Not a diagnosis.
+The live path can use a **shown** long-term usual as a prompt. It does **not** write Layer 1. **TRUST** on this card is how much to believe this stretch’s in-range / off call. Below 35% the card says it is still learning and will not call a reading off.
 
-[How the live baseline works](docs/baselines/WATCHDOG.md) · engine: `Watchdog.swift` · UI: `WatchdogView.swift`
+A phone notification is extreme only, and is not a diagnosis.
 
-Charge / Effort / Rest on Today are the original NOOP recovery stack. Layer 1 and Watchdog do not write them.
+Code: `Watchdog.swift`, `WatchdogView.swift` · [full note](docs/baselines/WATCHDOG.md)
 
-How-to docs for GitHub are only [`docs/baselines/`](docs/baselines/README.md) (overview, Layer 1, live baseline).
+### Charge is not these baselines
+
+**Charge / Effort / Rest** on Today are the original recovery and load scores. Layer 1 and the live baseline do not rewrite them and do not fold into them.
 
 ---
 
@@ -169,8 +183,8 @@ from **their own device**, on a machine **they** control.
 
 ## Contents
 
-- [Based on NOOP](#based-on-noop)
-- [Baseline and live baseline](#baseline-and-live-baseline)
+- [What this repo is for](#what-this-repo-is-for)
+- [The baselines](#the-baselines)
 - [Why NOOP](#why-noop)
 - [Features](#features)
 - [Platform status](#platform-status)
@@ -182,6 +196,7 @@ from **their own device**, on a machine **they** control.
 - [Disclaimer](#disclaimer)
 - [License](#license)
 - [Docs](#docs)
+- [Built on NOOP](#built-on-noop)
 
 ---
 
@@ -218,7 +233,7 @@ shared cross-platform code.
 | Screen | What it does |
 |---|---|
 | **Today** (Control Center) | Home dashboard: recovery ring, a "today's synthesis" insight, a grid of stat tiles (recovery, strain, sleep, HRV, RHR, SpO₂, respiratory, steps, weight, calories) each with a 14-day sparkline, live strap **battery %** and HR trend, recent workouts, and a data-sources footer. |
-| **Baseline** | **FRWHOOP.** Long-term usuals (Layer 1) and the **live baseline** card (last 30 minutes). See [Baseline and live baseline](#baseline-and-live-baseline). |
+| **Baseline** | **This repo’s work.** Long-term usuals and the live half-hour. See [The baselines](#the-baselines). |
 | **Readiness** | An on-device "should you push today?" read that synthesizes established sports-science signals from your own history — HRV vs your baseline (Plews/Buchheit), resting-HR drift (Lamberts), sleeping respiratory-rate drift, training-load balance (acute:chronic workload ratio, Gabbett) and training monotony (Foster) — into a single headline (Primed / Balanced / Strained / Run down) with the drivers behind it. Pure local math, not medical advice. |
 | **Live** | Real-time view of the connected strap — heart rate and frame stream as they arrive (~1 Hz). |
 | **Breathe** | **HRV haptic breathing biofeedback.** The strap both *measures* HRV (R-R intervals) and *buzzes* its haptic motor, so NOOP paces your breath with felt cues (one buzz inhale, two exhale) and shows live HR + rolling RMSSD responding as the session deepens. Presets: Relax 4-6, Coherence 5.5, Box 4-4. Each session reports a **pre/post HRV outcome** so you can see how much you settled. |
@@ -586,11 +601,6 @@ and it never installs anything. Both are detailed in
 
 ## Attribution
 
-**This project is based on [NOOP](https://github.com/ryanbr/NOOP).** The apps, BLE
-stack, SQLite store, Charge / Effort / Rest, and most screens are that existing
-code. FRWHOOP adds the Baseline tab (Layer 1 usuals and the live Watchdog
-half-hour) on top of it.
-
 NOOP stands on community interoperability and protocol-documentation work. With
 thanks:
 
@@ -686,3 +696,13 @@ protocol alongside us — this project is built on it.
 If NOOP's useful to you, a ⭐ genuinely helps it reach more WHOOP users — and it's the single best free way to support the project.
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=ryanbr/noop&type=Date)](https://star-history.dera.page/#ryanbr/noop&type=Date)
+
+---
+
+## Built on NOOP
+
+FRWHOOP is **built off the existing [NOOP](https://github.com/ryanbr/NOOP) codebase** (Ryan and the NOOP community). Pairing, BLE, on-device SQLite, Today, Charge / Effort / Rest, sleep, workouts, imports, and the Mac / iPhone / Android apps come from that project.
+
+This repository does not replace NOOP. It adds the **Baseline** tab — long-term usuals and the live half-hour — on top of that stack. Charge was not rewritten.
+
+License and notices stay with NOOP: [`LICENSE`](LICENSE), [`ATTRIBUTION.md`](ATTRIBUTION.md), [`DISCLAIMER.md`](DISCLAIMER.md). Not affiliated with WHOOP.
