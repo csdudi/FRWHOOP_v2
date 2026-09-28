@@ -116,8 +116,26 @@ public struct WatchdogWindow: Equatable, Sendable {
     public var activityLogits: [[Double]]
     /// Auto-workout overlap 0/1 per minute (past-future covariate). Never a saved Charge workout.
     public var autoWorkoutOverlap: [Double]
+    public var imu: [WatchdogIMUSample] = []
+    public var steps: [StepSample] = []
+    public var lastWorkoutEndUnix: Int = 0
+    public var sleepIntervals: [WatchdogSleepInterval] = []
+    /// Last bind of the 20-col block. Reconstruct rebuilds from imu/steps/sleep if this is empty.
+    public var activityFeatures: [[Double]] = []
 
     public var seqLen: Int { hr.count }
+
+    public mutating func bindActivityContext(lastWorkoutEndUnix: Int,
+                                             sleepIntervals: [WatchdogSleepInterval]) {
+        self.lastWorkoutEndUnix = lastWorkoutEndUnix
+        self.sleepIntervals = sleepIntervals
+        self.activityFeatures = WatchdogActivityFeatures.build(window: self)
+    }
+
+    public func resolvedActivityFeatures() -> [[Double]] {
+        if !activityFeatures.isEmpty { return activityFeatures }
+        return WatchdogActivityFeatures.build(window: self)
+    }
 
     public enum Channel: String, Equatable, Sendable, CaseIterable, Codable, Hashable {
         case hr, rhr, hrv, temp, resp, spo2, motion
@@ -168,19 +186,16 @@ public enum WatchdogWindowBuilder {
         if resp.compactMap({ $0 }).isEmpty {
             resp = respFromRR(feed.rr, start: start, end: end)
         }
-        let motion = interpolateGaps(bucketMean(feed.motion.map { ($0.ts, $0.value) }, start: start, end: end))
-        let hrv = holdForward(rmssdGrid(feed.rr, start: start, end: end), seed: feed.holdSeeds.hrv)
+        let motion = bucketMean(feed.motion.map { ($0.ts, $0.value) }, start: start, end: end)
+        let hrv = rmssdGrid(feed.rr, start: start, end: end)
         let spo2All = bucketMean(percentSpO2(feed.spo2Pct).map { ($0.ts, $0.value) }, start: start, end: end)
-        var spo2 = maskLookback(spo2All, keepSeconds: WatchdogConfig.spo2LookbackSeconds)
+        let spo2 = maskLookback(spo2All, keepSeconds: WatchdogConfig.spo2LookbackSeconds)
         let logitsRaw = WatchdogActivityRuntime.embed(motion: motion, hr: hr, steps: feed.steps, imu: feed.imu,
-                                                   startUnix: start, nowUnix: end)
+                                                   startUnix: start, nowUnix: end, family: feed.family)
         let workoutBits = Self.autoWorkoutBits(hr: hrDeduped, start: start, end: end)
         let logits = WatchdogActivityRuntime.applyAutoWorkoutOverlap(logitsRaw, overlap: workoutBits)
-        let rhr = restHr(hr: hr, motion: motion, logits: logits, nowUnix: end)
-        var tempHeld = temp
-        resp = holdForward(resp, seed: feed.holdSeeds.resp)
-        tempHeld = holdForward(tempHeld, seed: feed.holdSeeds.temp)
-        spo2 = holdForward(spo2, seed: feed.holdSeeds.spo2)
+        let rhr = restHr(hr: hr, motion: motion, logits: logits, nowUnix: end, steps: feed.steps,
+                         startUnix: start, endUnix: end)
         let ppg = uniquePPGIdentities(feed.ppgIdentities)
 
         let coverage = coverageFraction(hr: hr, family: feed.family, hrTimes: inWindow.map(\.ts), start: start, end: end)
@@ -189,12 +204,12 @@ public enum WatchdogWindowBuilder {
         let gap = maxGap(inWindow.map(\.ts), start: start, end: end)
         let newest = inWindow.map(\.ts).max().map { end - $0 } ?? WatchdogConfig.contextSeconds
 
-        return .success(WatchdogWindow(
+        var window = WatchdogWindow(
             family: feed.family,
             hrSource: feed.hrSource,
             startUnix: start,
             nowUnix: end,
-            hr: hr, hrv: hrv, temp: tempHeld, resp: resp, motion: motion,
+            hr: hr, hrv: hrv, temp: temp, resp: resp, motion: motion,
             rhr: rhr, spo2: spo2,
             hrMin: hrMin, hrMax: hrMax,
             coverage: coverage,
@@ -204,8 +219,12 @@ public enum WatchdogWindowBuilder {
             bucketCoverage: buckets,
             maxEmptyMinutes: emptyRun,
             activityLogits: logits,
-            autoWorkoutOverlap: workoutBits
-        ))
+            autoWorkoutOverlap: workoutBits,
+            imu: feed.imu,
+            steps: feed.steps
+        )
+        window.activityFeatures = WatchdogActivityFeatures.build(window: window)
+        return .success(window)
     }
 
     /// Identical BPM with no new timestamp is not a new observation.
@@ -229,7 +248,7 @@ public enum WatchdogWindowBuilder {
         }
     }
 
-    /// Last good reading fills a gap while the strap is on. Wrist-off never reaches here.
+    /// Last good reading fills a gap. Display helper only — `build` does not apply this to scored channels.
     public static func holdForward(_ series: [Double?], seed: Double? = nil) -> [Double?] {
         var last = seed
         return series.map { value in
@@ -278,9 +297,26 @@ public enum WatchdogWindowBuilder {
     }
 
     /// Resting HR: still / standing minutes only. Walk, run, lift, cycle, artifact never enter RHR.
-    static func restHr(hr: [Double?], motion: [Double?], logits: [[Double]], nowUnix: Int) -> [Double?] {
+    static func restHr(hr: [Double?], motion: [Double?], logits: [[Double]], nowUnix: Int,
+                       steps: [StepSample] = [], startUnix: Int = 0, endUnix: Int = 0) -> [Double?] {
+        let span = max(endUnix - startUnix, 1)
+        let n = hr.count
+        func minuteIndex(_ ts: Int) -> Int {
+            guard n > 0 else { return 0 }
+            return min(n - 1, max(0, ((ts - startUnix) * n) / span))
+        }
+        var loco = Array(repeating: 0.0, count: n)
+        var stepN = Array(repeating: 0.0, count: n)
+        if endUnix > startUnix {
+            for s in steps where s.ts >= startUnix && s.ts < endUnix {
+                let i = minuteIndex(s.ts)
+                stepN[i] += 1
+                if s.activityClass == 1 || s.activityClass == 2 { loco[i] += 1 }
+            }
+        }
         let still = (0..<hr.count).map { i -> Double? in
             guard let bpm = hr[i] else { return nil }
+            if stepN[i] > 0, loco[i] / stepN[i] >= 0.5 { return nil }
             let occ = motion[i] ?? 0
             let label = i < logits.count
                 ? (WatchdogActivityClass.labels(logits: [logits[i]]).first ?? "")
@@ -301,10 +337,10 @@ public enum WatchdogWindowBuilder {
             }
             return bpm
         }
-        return fillStrip(still)
+        return still
     }
 
-    /// Hold last known both forward and back so a short lookback still draws the full 30-minute canvas.
+    /// Display helper only. Scoring windows must not use this — empty minutes stay nil.
     static func fillStrip(_ series: [Double?], seed: Double? = nil) -> [Double?] {
         let forward = holdForward(series, seed: seed)
         let first = forward.compactMap { $0 }.first

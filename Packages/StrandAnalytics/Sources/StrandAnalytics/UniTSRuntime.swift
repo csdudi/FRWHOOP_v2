@@ -7,7 +7,7 @@ public struct UniTSPrompt: Equatable, Sendable {
     public var hrv: Double?
     /// Established awake-rest HRV (ms). Never averaged with sleep. Nil unless that copy is shown.
     public var hrvAwake: Double?
-    /// `hrv` came from overnight sleep HRV; live rest is then scaled by `hrvSleepToAwake`.
+    /// `hrv` came from overnight sleep HRV. No sleep÷wake multiplier; live rest stays that sleep usual until a shown awake copy exists.
     public var hrvAnchoredInSleep: Bool
     public var source: WatchdogPromptSource
     public var temp: Double?
@@ -48,19 +48,45 @@ public struct UniTSPrompt: Equatable, Sendable {
         self.scaleSpO2 = scaleSpO2
     }
 
+    /// One Layer 1 copy for both hat and TRUST. Long wins if shown; else week. Held copies older than 7 days are not current.
+    public static func shownCopy(_ ev: LBEvaluation) -> (center: Double, trust: Int)? {
+        func accept(_ copy: LBCopySnapshot?, trust: Int, show: Bool) -> (Double, Int)? {
+            guard show, let copy, trust >= LongitudinalBaseline.trustHideThreshold else { return nil }
+            if copy.held, !heldFresh(lastUpdate: copy.lastUpdate, asOf: ev.asOf) { return nil }
+            return (copy.centerDisplay, trust)
+        }
+        if let long = accept(ev.copyLong, trust: ev.usualTrustPctLong, show: ev.showLong) { return long }
+        if let week = accept(ev.copy7, trust: ev.usualTrustPct7, show: ev.show7) { return week }
+        return nil
+    }
+
+    static func heldFresh(lastUpdate: String?, asOf: String) -> Bool {
+        guard let lastUpdate else { return false }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy-MM-dd"
+        guard let a = f.date(from: String(asOf.prefix(10))),
+              let b = f.date(from: String(lastUpdate.prefix(10))) else { return false }
+        return abs(a.timeIntervalSince(b)) <= 7 * 86400
+    }
+
     public static func from(evaluations: [LBEvaluation]) -> UniTSPrompt {
         func center(_ series: LBSeries) -> Double? {
-            evaluations.first(where: { $0.series == series })?.copyLong?.centerDisplay
-            ?? evaluations.first(where: { $0.series == series })?.copy7?.centerDisplay
+            guard let ev = evaluations.first(where: { $0.series == series }) else { return nil }
+            if let shown = shownCopy(ev) { return shown.center }
+            guard let copy = ev.copyLong ?? ev.copy7 else { return nil }
+            if copy.held, !heldFresh(lastUpdate: copy.lastUpdate, asOf: ev.asOf) { return nil }
+            return copy.centerDisplay
         }
         func shownCenter(_ series: LBSeries) -> Double? {
             guard let ev = evaluations.first(where: { $0.series == series }) else { return nil }
-            let trust = max(ev.usualTrustPctLong, ev.usualTrustPct7)
-            guard trust >= LongitudinalBaseline.trustHideThreshold else { return nil }
-            return ev.copyLong?.centerDisplay ?? ev.copy7?.centerDisplay
+            return shownCopy(ev)?.center
         }
         let sleepHRV = center(.sleepHRVLn)
         let awakeHRV = shownCenter(.awakeRestHRVLn)
+        // Sleep HRV / sleep SpO₂ usuals are 24-hour: live daytime minutes still compare to
+        // those recorded overnight copies. They are not wiped just because it is wake.
         // Instant HR usual is daytime rest / all-day HR. Sleep RHR never fills this slot.
         let hr = shownCenter(.awakeRestHR) ?? shownCenter(.continuousHR)
         // Still RHR usual is overnight / still-gated only. Daytime HR never fills this slot.
@@ -103,10 +129,16 @@ public struct UniTSPrompt: Equatable, Sendable {
     static func displayMAD(_ evaluations: [LBEvaluation], _ series: LBSeries, shownOnly: Bool) -> Double? {
         guard let ev = evaluations.first(where: { $0.series == series }) else { return nil }
         if shownOnly {
-            let trust = max(ev.usualTrustPctLong, ev.usualTrustPct7)
-            guard trust >= LongitudinalBaseline.trustHideThreshold else { return nil }
+            guard shownCopy(ev) != nil else { return nil }
         }
-        let copy = ev.copyLong ?? ev.copy7
+        let copy: LBCopySnapshot?
+        if ev.showLong, let c = ev.copyLong, shownCopy(ev)?.trust == ev.usualTrustPctLong {
+            copy = c
+        } else if ev.show7 {
+            copy = ev.copy7
+        } else {
+            copy = ev.copyLong ?? ev.copy7
+        }
         guard let copy else { return nil }
         let half = max(copy.bandHiDisplay - copy.centerDisplay, copy.centerDisplay - copy.bandLoDisplay)
         let k = max(ev.kBandUsed, 1)
@@ -160,19 +192,22 @@ public struct UniTSResidual: Equatable, Sendable {
 public struct UniTSRuntime: Sendable {
     public init() {}
 
-    public func reconstruct(_ window: WatchdogWindow, prompt: UniTSPrompt) throws -> UniTSResidual {
-        let features = WatchdogActivityFeatures.build(window: window)
-        let occ = Self.occupancy(window)
+    public func reconstruct(_ window: WatchdogWindow, prompt: UniTSPrompt,
+                            tail: WatchdogLiveTail? = nil) throws -> UniTSResidual {
+        let live = tail ?? WatchdogLiveTail.resolve(window)
+        let features = window.resolvedActivityFeatures()
+        let occ = live.clipEffortOccupancy(Self.physiologyOccupancy(window, features: features))
         if let residual = Self.coreMLResidual(window: window, prompt: prompt,
-                                              occupancy: occ, activity: features) {
+                                              occupancy: occ, activity: features, tail: live) {
             return residual
         }
-        return Self.priorResidual(window: window, prompt: prompt, occupancy: occ)
+        return Self.priorResidual(window: window, prompt: prompt, occupancy: occ, tail: live)
     }
 
     /// Core ML UniTS-AD checkpoint: both \(\hat{x}\) and \(\sigma\) come from one inference.
     static func coreMLResidual(window: WatchdogWindow, prompt: UniTSPrompt, occupancy: [Double],
-                               activity: [[Double]] = []) -> UniTSResidual? {
+                               activity: [[Double]] = [],
+                               tail: WatchdogLiveTail? = nil) -> UniTSResidual? {
         let bases = resolvedBases(window: window, prompt: prompt)
         let personal = [prompt.scaleHR, prompt.scaleRHR, prompt.scaleHRV,
                         prompt.scaleTemp, prompt.scaleResp, prompt.scaleSpO2]
@@ -213,16 +248,19 @@ public struct UniTSRuntime: Sendable {
             hatTemp: hatTemp, hatResp: hatResp, hatSpO2: hatSpO2,
             scaleHR: scale(0), scaleRHR: scale(1), scaleHRV: scale(2),
             scaleTemp: scale(3), scaleResp: scale(4), scaleSpO2: scale(5),
-            modelVersion: WatchdogConfig.modelVersion
+            modelVersion: WatchdogConfig.modelVersion,
+            tail: tail
         )
     }
 
-    static func priorResidual(window: WatchdogWindow, prompt: UniTSPrompt, occupancy: [Double]) -> UniTSResidual {
-        physicsResidual(window: window, prompt: prompt, occupancy: occupancy)
+    static func priorResidual(window: WatchdogWindow, prompt: UniTSPrompt, occupancy: [Double],
+                              tail: WatchdogLiveTail? = nil) -> UniTSResidual {
+        physicsResidual(window: window, prompt: prompt, occupancy: occupancy, tail: tail)
     }
 
     /// Physics prior used as Core ML input / load-fail fallback. Not the v2 detector.
-    static func physicsResidual(window: WatchdogWindow, prompt: UniTSPrompt, occupancy: [Double]) -> UniTSResidual {
+    static func physicsResidual(window: WatchdogWindow, prompt: UniTSPrompt, occupancy: [Double],
+                                tail: WatchdogLiveTail? = nil) -> UniTSResidual {
         let hatHR = reconstructHR(observed: window.hr, prompt: prompt.hr, occupancy: occupancy)
         let hatRHR = reconstructRHR(observed: window.rhr, prompt: prompt.rhr)
         let hatHRV = reconstructHRV(observed: window.hrv, prompt: prompt, occupancy: occupancy)
@@ -268,7 +306,8 @@ public struct UniTSRuntime: Sendable {
             hatTemp: hatTemp, hatResp: hatResp, hatSpO2: hatSpO2,
             scaleHR: scaleHR, scaleRHR: scaleRHR, scaleHRV: scaleHRV,
             scaleTemp: scaleTemp, scaleResp: scaleResp, scaleSpO2: scaleSpO2,
-            modelVersion: WatchdogConfig.fallbackModelVersion
+            modelVersion: WatchdogConfig.fallbackModelVersion,
+            tail: tail
         )
     }
 
@@ -310,7 +349,9 @@ public struct UniTSRuntime: Sendable {
                                hatTemp: [Double?], hatResp: [Double?], hatSpO2: [Double?],
                                scaleHR: [Double], scaleRHR: [Double], scaleHRV: [Double],
                                scaleTemp: [Double], scaleResp: [Double], scaleSpO2: [Double],
-                               modelVersion: String) -> UniTSResidual {
+                               modelVersion: String,
+                               tail: WatchdogLiveTail? = nil) -> UniTSResidual {
+        let live = tail ?? WatchdogLiveTail.resolve(window)
         let sHR = WatchdogCalibration.applySigma(scaleHR, channel: .hr, coldStart: prompt.hr == nil)
         let sRHR = WatchdogCalibration.applySigma(scaleRHR, channel: .rhr, coldStart: prompt.rhr == nil)
         let sHRV = WatchdogCalibration.applySigma(scaleHRV, channel: .hrv,
@@ -321,17 +362,23 @@ public struct UniTSRuntime: Sendable {
                                                   coldStart: prompt.resp == nil || prompt.source == .population)
         let sSpO2 = WatchdogCalibration.applySigma(scaleSpO2, channel: .spo2,
                                                   coldStart: prompt.spo2 == nil || prompt.source == .population)
-        let hrScore = score(window.hr, hatHR, floor: WatchdogConfig.hrScale, personal: prompt.scaleHR, predicted: sHR)
-        let rhrObs = WatchdogWindowBuilder.maskLookback(window.rhr, keepSeconds: WatchdogConfig.rhrLookbackSeconds)
+        let hrScore = score(live.maskScored(window.hr, window: window), hatHR,
+                            floor: WatchdogConfig.hrScale, personal: prompt.scaleHR, predicted: sHR)
+        let rhrObs = WatchdogWindowBuilder.maskLookback(live.maskScored(window.rhr, window: window),
+                                                        keepSeconds: WatchdogConfig.rhrLookbackSeconds)
         let rhrHat = WatchdogWindowBuilder.maskLookback(hatRHR, keepSeconds: WatchdogConfig.rhrLookbackSeconds)
         let rhrPredicted = WatchdogWindowBuilder.maskLookback(sRHR.map { Optional($0) },
                                                              keepSeconds: WatchdogConfig.rhrLookbackSeconds)
             .map { $0 ?? WatchdogConfig.hrScale }
         let rhrScore = score(rhrObs, rhrHat, floor: WatchdogConfig.hrScale, personal: prompt.scaleRHR, predicted: rhrPredicted)
-        let hrvScore = score(window.hrv, hatHRV, floor: WatchdogConfig.hrvScale, personal: prompt.scaleHRV, predicted: sHRV)
-        let tempScore = score(window.temp, hatTemp, floor: WatchdogConfig.tempScale, personal: prompt.scaleTemp, predicted: sTemp)
-        let respScore = score(window.resp, hatResp, floor: WatchdogConfig.respScale, personal: prompt.scaleResp, predicted: sResp)
-        let spo2Score = score(window.spo2, hatSpO2, floor: WatchdogConfig.spo2Scale, personal: prompt.scaleSpO2, predicted: sSpO2)
+        let hrvScore = score(live.maskScored(window.hrv, window: window), hatHRV,
+                             floor: WatchdogConfig.hrvScale, personal: prompt.scaleHRV, predicted: sHRV)
+        let tempScore = score(live.maskScored(window.temp, window: window), hatTemp,
+                              floor: WatchdogConfig.tempScale, personal: prompt.scaleTemp, predicted: sTemp)
+        let respScore = score(live.maskScored(window.resp, window: window), hatResp,
+                              floor: WatchdogConfig.respScale, personal: prompt.scaleResp, predicted: sResp)
+        let spo2Score = score(live.maskScored(window.spo2, window: window), hatSpO2,
+                              floor: WatchdogConfig.spo2Scale, personal: prompt.scaleSpO2, predicted: sSpO2)
         var energy: [WatchdogWindow.Channel: Double] = [:]
         var rangeHalf: [WatchdogWindow.Channel: Double] = [:]
         energy[.hr] = hrScore.energy; rangeHalf[.hr] = hrScore.rangeHalf
@@ -457,7 +504,14 @@ public struct UniTSRuntime: Sendable {
     }
 
     static func occupancy(_ window: WatchdogWindow) -> [Double] {
-        WatchdogActivityRuntime.effortOccupancy(motion: window.motion, logits: window.activityLogits)
+        physiologyOccupancy(window, features: window.resolvedActivityFeatures())
+    }
+
+    static func physiologyOccupancy(_ window: WatchdogWindow, features: [[Double]]) -> [Double] {
+        if WatchdogActivityFeatures.usesRawActivity(features) {
+            return features.map { WatchdogActivityFeatures.priorOccupancy($0) }
+        }
+        return WatchdogActivityRuntime.effortOccupancy(motion: window.motion, logits: window.activityLogits)
     }
 
     static func occupancy(_ motion: [Double?]) -> [Double] {
@@ -486,9 +540,13 @@ public struct UniTSRuntime: Sendable {
 
     /// Last minute where both live and reconstruction exist. Do not pair a held/latest
     /// reading with a later occupancy-only hat — that falsely flags a gap as off.
-    static func lastPaired(_ observed: [Double?], _ hat: [Double?]) -> (obs: Double, hat: Double)? {
-        for (o, h) in zip(observed, hat).reversed() {
-            if let o, let h { return (obs: o, hat: h) }
+    static func lastPaired(_ observed: [Double?], _ hat: [Double?],
+                           from index: Int = 0) -> (obs: Double, hat: Double)? {
+        let n = min(observed.count, hat.count)
+        let lo = min(max(0, index), n)
+        guard n > lo else { return nil }
+        for i in stride(from: n - 1, through: lo, by: -1) {
+            if let o = observed[i], let h = hat[i] { return (obs: o, hat: h) }
         }
         return nil
     }

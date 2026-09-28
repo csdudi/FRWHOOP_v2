@@ -16,6 +16,13 @@ final class UniTSCoreMLSession: @unchecked Sendable {
         return model != nil
     }
 
+    var declaresActivityInput: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        _ = loadIfNeeded()
+        return model?.modelDescription.inputDescriptionsByName["activity"] != nil
+    }
+
     func predict(occupancy: [Double], prompt: [Double], personalScale: [Double],
                  observed: [[Double]], activity: [[Double]] = []) -> (hat: [[Double]], sigma: [[Double]])? {
         lock.lock()
@@ -32,7 +39,8 @@ final class UniTSCoreMLSession: @unchecked Sendable {
                 "personal_scale": MLFeatureValue(multiArray: sc),
                 "observed": MLFeatureValue(multiArray: obs)
             ]
-            if !activity.isEmpty, let act = try? Self.timeFeatures(activity) {
+            let hasActivity = model.modelDescription.inputDescriptionsByName["activity"] != nil
+            if hasActivity, !activity.isEmpty, let act = try? Self.timeFeatures(activity) {
                 dict["activity"] = MLFeatureValue(multiArray: act)
             }
             let input = try MLDictionaryFeatureProvider(dictionary: dict)

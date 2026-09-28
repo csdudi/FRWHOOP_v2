@@ -254,19 +254,28 @@ struct TestCentreView: View {
                 Text("WATCHDOG")
                     .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
                     .foregroundStyle(StrandPalette.textSecondary)
+                Text("Tick now is live. Tapes below replace the window. Then open Baseline.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(model.baseline.watchdogResult?.headline ?? "No tick yet. Pair the strap, open Baseline, or tap Tick now.")
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
+                if let r = model.baseline.watchdogResult {
+                    Text("TRUST \(r.trustPct)% · \(r.eventLabel) · \(r.episodeState.rawValue)")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                }
                 Text(model.baseline.watchdogResult?.qualityLine ?? "Interval \(model.baseline.liveIntervalMinutes) min")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
                 if let r = model.baseline.watchdogResult, !r.directionMarks.isEmpty {
-                    Text("Dir \(zip(WatchdogDirection.names, r.directionMarks).map { "\($0) \($1)" }.joined(separator: " · ")) · J \(String(format: "%.2f", r.jointEnergy)) · Fc \(String(format: "%.2f", r.forecastEnergy)) · \(r.eventLabel) · cut \(r.cutReason) · \(r.eventExplained ? "explained" : "unexplained") · \(r.calibrationSource)")
+                    Text("Dir \(zip(WatchdogDirection.names, r.directionMarks).map { "\($0) \($1)" }.joined(separator: " · ")) · J \(String(format: "%.2f", r.jointEnergy)) · Fc \(String(format: "%.2f", r.forecastEnergy)) · cut \(r.cutReason) · \(r.eventExplained ? "explained" : "unexplained") · \(r.calibrationSource)")
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
                 HStack(spacing: NoopMetrics.space3) {
                     NoopButton("Tick now", systemImage: "timer", kind: .secondary) {
                         Task { await model.watchdog.tick() }
@@ -276,6 +285,17 @@ struct TestCentreView: View {
                     }
                     NoopButton("Severe", systemImage: "exclamationmark.triangle", kind: .secondary) {
                         Task { await model.watchdog.tick(inject: .severe) }
+                    }
+                }
+                HStack(spacing: NoopMetrics.space3) {
+                    NoopButton("Walk tape", systemImage: "figure.walk", kind: .secondary) {
+                        Task { await model.watchdog.tick(inject: .walk) }
+                    }
+                    NoopButton("Learning tape", systemImage: "chart.line.uptrend.xyaxis", kind: .secondary) {
+                        Task { await model.watchdog.tick(inject: .learning) }
+                    }
+                    NoopButton("Off wrist", systemImage: "applewatch.slash", kind: .secondary) {
+                        Task { await model.watchdog.tick(inject: .wristOff) }
                     }
                 }
                 NoopButton("Test notification", systemImage: "bell", kind: .secondary) {

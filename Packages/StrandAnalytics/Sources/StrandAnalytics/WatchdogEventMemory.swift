@@ -74,10 +74,19 @@ public struct WatchdogEventMemory: Equatable, Sendable, Codable {
         lab == .abnormalStillTachycardia || lab == .abnormalMultiDirection || lab == .abnormalSpo2Still
     }
 
+    public static func isWorkout(_ lab: WatchdogEventLabel) -> Bool {
+        lab == .workoutWalk || lab == .workoutRun || lab == .workoutCycle || lab == .workoutLift
+    }
+
     public static func compatible(teacher: WatchdogEventLabel, candidate: WatchdogEventLabel,
                                   explained: Bool) -> Bool {
         if isQuality(teacher) || isQuality(candidate) { return false }
-        if explained { return isExplainedFamily(teacher) && isExplainedFamily(candidate) }
+        if teacher == .forecastDriftOnly { return candidate == .forecastDriftOnly }
+        if isWorkout(teacher) { return candidate == teacher }
+        if teacher == .postWorkout || teacher == .normalSleep || teacher == .normalStillAwake {
+            return candidate == teacher
+        }
+        if explained { return false }
         return isAbnormal(teacher) && isAbnormal(candidate)
     }
 

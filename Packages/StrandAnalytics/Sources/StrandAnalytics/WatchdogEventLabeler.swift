@@ -43,7 +43,70 @@ public struct WatchdogEvent: Equatable, Sendable, Codable {
 public enum WatchdogEventLabeler: Sendable {
     public static let postWorkoutSeconds = 20 * 60
     public static let familyHoldMinutes = 2
+    public static let familyHoldSeconds = familyHoldMinutes * 60
+    public static let sleepEdgeSeconds = 5 * 60
     public static let maxEventSeconds = 45 * 60
+
+    public static func familyHeld(nowUnix: Int, changedUnix: Int) -> Bool {
+        if changedUnix <= 0 { return true }
+        return nowUnix - changedUnix >= familyHoldSeconds
+    }
+
+    public static func holdElapsedSeconds(familyStableTicks: Int,
+                                          familyChangedUnix: Int,
+                                          nowUnix: Int) -> Int {
+        if familyChangedUnix > 0, nowUnix > familyChangedUnix {
+            return nowUnix - familyChangedUnix
+        }
+        return max(0, familyStableTicks) * WatchdogConfig.tickSeconds
+    }
+
+    public static func sleepIntervalOpen(_ intervals: [WatchdogSleepInterval], unix: Int) -> Bool {
+        intervals.contains { $0.contains(unix) }
+    }
+
+    public static func sleepIntervalEdge(_ intervals: [WatchdogSleepInterval], unix: Int) -> Bool {
+        intervals.contains { iv in
+            abs(unix - iv.startUnix) < sleepEdgeSeconds || abs(unix - iv.endUnix) < sleepEdgeSeconds
+        }
+    }
+
+    public static func wearerDisplay(_ label: WatchdogEventLabel, lastCommitted: String) -> String {
+        if label == .mixedRejected {
+            if lastCommitted.isEmpty || lastCommitted == WatchdogEventLabel.mixedRejected.rawValue {
+                return ""
+            }
+            return lastCommitted
+        }
+        return label.rawValue
+    }
+
+    /// Wearer banner. Tokens and mixed_rejected never print.
+    public static func wearerPhrase(_ label: WatchdogEventLabel, lastCommitted: String = "") -> String {
+        if label == .mixedRejected {
+            if let prev = WatchdogEventLabel(rawValue: lastCommitted), prev != .mixedRejected {
+                return wearerPhrase(prev)
+            }
+            return "Settling"
+        }
+        switch label {
+        case .wristOff: return "Off wrist"
+        case .gap: return "Waiting"
+        case .artifactSpike: return "Noisy motion"
+        case .workoutWalk: return "Walking"
+        case .workoutRun: return "Running"
+        case .workoutCycle: return "Cycling"
+        case .workoutLift: return "Lifting"
+        case .postWorkout: return "After exercise"
+        case .normalSleep: return "Asleep"
+        case .normalStillAwake: return "Still"
+        case .forecastDriftOnly: return "Looking ahead"
+        case .abnormalStillTachycardia, .abnormalMultiDirection, .abnormalSpo2Still:
+            return "A bit unlike usual"
+        case .safetyBound: return "Checking a reading"
+        case .mixedRejected: return "Settling"
+        }
+    }
 
     public static func family(of cls: WatchdogActivityClass) -> String {
         switch cls {
@@ -56,30 +119,25 @@ public enum WatchdogEventLabeler: Sendable {
         }
     }
 
+    /// Device facts only — not a second exclusive table. Workout names wait on the 2 min hold in `what`.
     public static func liveHint(window: WatchdogWindow, lastWorkoutEndUnix: Int,
                                 unavailable: WatchdogUnavailable? = nil) -> WatchdogEventLabel {
         if unavailable == .wristOff { return .wristOff }
         if unavailable != nil { return .gap }
-        if WatchdogActivityRuntime.isArtifact(window.activityLogits) { return .artifactSpike }
-        let raw = WatchdogActivityClass.labels(logits: window.activityLogits).last ?? "unknown"
-        let cls = WatchdogActivityClass.allCases.first(where: { $0.rawValue == raw }) ?? .unknown
+        let tail = WatchdogLiveTail.resolve(window)
+        if WatchdogActivityRuntime.isArtifact(window.activityLogits, from: tail.startIndex) {
+            return .artifactSpike
+        }
         if lastWorkoutEndUnix > 0,
            window.nowUnix - lastWorkoutEndUnix < postWorkoutSeconds,
-           cls == .still || cls == .stand {
+           tail.stillNow {
             return .postWorkout
         }
-        switch cls {
-        case .walk: return .workoutWalk
-        case .run: return .workoutRun
-        case .cycleLike: return .workoutCycle
-        case .resistance: return .workoutLift
-        case .artifact: return .artifactSpike
-        case .still, .stand:
-            let hour = Calendar.current.component(.hour, from: Date(timeIntervalSince1970: TimeInterval(window.nowUnix)))
-            return (hour >= 0 && hour < 5) ? .normalSleep : .normalStillAwake
-        case .unknown:
-            return .normalStillAwake
-        }
+        if tail.period == .effort { return .mixedRejected }
+        let sleep = sleepIntervalOpen(window.sleepIntervals, unix: window.nowUnix)
+            || (window.activityFeatures.last.map { WatchdogActivityFeatures.sleepBit($0) == 1 } ?? false)
+        if sleep { return .normalSleep }
+        return .normalStillAwake
     }
 
     public static func earlyAllowed(_ label: WatchdogEventLabel) -> Bool {
@@ -93,7 +151,17 @@ public enum WatchdogEventLabeler: Sendable {
     }
 
     public static func bandEligible(_ label: WatchdogEventLabel) -> Bool {
-        label == .normalSleep || label == .normalStillAwake
+        WatchdogBand.learnable(label)
+    }
+
+    /// Sidecar / session usuals. Forecast-drift may still write on rest (point 7). Band does not.
+    public static func sidecarEligible(_ label: WatchdogEventLabel) -> Bool {
+        switch label {
+        case .normalSleep, .normalStillAwake, .forecastDriftOnly:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Device facts only. Workout names require UniTS `explained` — never a calendar or a human click.

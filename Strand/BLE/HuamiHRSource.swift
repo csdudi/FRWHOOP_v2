@@ -194,6 +194,7 @@ public final class HuamiHRSource: NSObject, ObservableObject {
         }
         if feedsLive {
             live.heartRate = hr
+            live.noteHeartRatePacket(bpm: hr)
             live.connected = true
         }
         enqueue(hr: hr)

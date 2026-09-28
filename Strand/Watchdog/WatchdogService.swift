@@ -11,6 +11,7 @@ final class WatchdogService {
     private var carry = WatchdogCarry.empty
     private var liveHRRing: [HRSample] = []
     private var liveRRRing: [RRInterval] = []
+    private var lastRRSeq: Int = -1
     private var cancellables = Set<AnyCancellable>()
 
     func start(on model: AppModel) {
@@ -43,6 +44,11 @@ final class WatchdogService {
         } else {
             window = .failure(.empty)
         }
+        let sessions = await model.repo.sleepSessions(from: now - 20 * 3600, to: now + 3600, limit: 40)
+        let sleepIntervals = sessions.map {
+            WatchdogSleepInterval(startUnix: $0.effectiveStartTs, endUnix: $0.endTs)
+        }
+        let sleepOpen = sleepIntervals.contains { $0.contains(now) }
         let result = Watchdog.evaluate(window: window,
                                        prompt: prompt,
                                        evaluations: promptEvals,
@@ -50,7 +56,9 @@ final class WatchdogService {
                                        nowUnix: now,
                                        liveIntervalMinutes: WatchdogConfig.defaultLiveIntervalMinutes,
                                        previous: carry,
-                                       inject: inject)
+                                       inject: inject,
+                                       sleepSessionOpen: sleepOpen,
+                                       sleepIntervals: sleepIntervals)
         carry = result.carry
         persistCarry()
         model.baseline.applyWatchdog(result)
@@ -70,15 +78,24 @@ final class WatchdogService {
     }
 
     private func captureLive(_ model: AppModel) {
-        let ts = Int(Date().timeIntervalSince1970)
-        let cut = ts - WatchdogConfig.contextSeconds
-        if let bpm = model.bpm ?? model.live.heartRate, (30...220).contains(bpm) {
-            if liveHRRing.last?.ts != ts {
-                liveHRRing.append(HRSample(ts: ts, bpm: bpm))
-            }
+        let now = Int(Date().timeIntervalSince1970)
+        let cut = now - WatchdogConfig.contextSeconds
+        if let sample = WatchdogLiveTape.hrSample(
+            lastRingTs: liveHRRing.last?.ts,
+            packetUnix: model.live.lastHeartRatePacketUnix,
+            packetBpm: model.live.lastHeartRatePacketBpm
+        ) {
+            liveHRRing.append(sample)
         }
-        if let rrMs = model.live.rr.last, rrMs > 250, rrMs < 3000 {
-            liveRRRing.append(RRInterval(ts: ts, rrMs: rrMs))
+        if let beat = WatchdogLiveTape.rrSample(
+            lastSeq: lastRRSeq,
+            currentSeq: model.live.rrSeq,
+            lastRingTs: liveRRRing.last?.ts,
+            packetUnix: model.live.lastHeartRatePacketUnix,
+            rrMs: model.live.rr.last
+        ) {
+            lastRRSeq = model.live.rrSeq
+            liveRRRing.append(beat)
         }
         liveHRRing.removeAll { $0.ts < cut }
         liveRRRing.removeAll { $0.ts < cut }
@@ -133,8 +150,12 @@ final class WatchdogService {
             return WatchdogScalarSample(ts: g.ts, value: occ)
         }
         let events = mergeByTs(eventLists, ts: \.ts)
-        let liveBeating = (model.bpm ?? model.live.heartRate).map { (30...220).contains($0) } ?? false
-        let wristOff = lastWristOff(events) && !liveBeating
+        let liveBeating = WatchdogLiveTape.isFresh(
+            packetUnix: model.live.lastHeartRatePacketUnix,
+            now: now,
+            freshnessSeconds: WatchdogQuality.freshnessLimit(family)
+        )
+        let wristOff = WatchdogLiveTape.wristOff(deviceOff: lastWristOff(events), freshLiveHR: liveBeating)
         let spo2Pct = mergeByTs(spo2Lists, ts: \.ts).compactMap { sample -> WatchdogScalarSample? in
             guard sample.ir <= 0,
                   AnalyticsEngine.spo2SingleChannelPlausible.contains(sample.red) else { return nil }
@@ -146,10 +167,7 @@ final class WatchdogService {
         let feed = WatchdogFeed(family: family, hrSource: hrSource, nowUnix: now,
                                 hr: hr, rr: rr, skinTempC: temps, motion: motion,
                                 spo2Pct: spo2Pct, wristOff: wristOff,
-                                holdSeeds: WatchdogHoldSeeds(resp: carry.lastHeldResp,
-                                                             hrv: carry.lastHeldHRV,
-                                                             temp: carry.lastHeldTemp,
-                                                             spo2: carry.lastHeldSpO2),
+                                holdSeeds: .empty,
                                 imu: imu, steps: steps)
         return WatchdogWindowBuilder.build(feed)
     }
@@ -158,19 +176,16 @@ final class WatchdogService {
         captureLive(model)
         let from = now - WatchdogConfig.contextSeconds
         let hr = liveHRRing.filter { $0.ts >= from }
-        let liveBeating = (model.bpm ?? model.live.heartRate).map { (30...220).contains($0) } ?? false
+        let liveBeating = WatchdogLiveTape.isFresh(
+            packetUnix: model.live.lastHeartRatePacketUnix,
+            now: now,
+            freshnessSeconds: WatchdogQuality.freshnessLimit(.whoop4)
+        )
         if hr.isEmpty && !liveBeating { return .failure(.empty) }
-        var samples = hr
-        if let bpm = model.bpm ?? model.live.heartRate, (30...220).contains(bpm) {
-            samples.append(HRSample(ts: now, bpm: bpm))
-        }
         let feed = WatchdogFeed(family: .whoop4, hrSource: .live2A37, nowUnix: now,
-                                hr: samples, rr: liveRRRing.filter { $0.ts >= from },
+                                hr: hr, rr: liveRRRing.filter { $0.ts >= from },
                                 wristOff: false,
-                                holdSeeds: WatchdogHoldSeeds(resp: carry.lastHeldResp,
-                                                             hrv: carry.lastHeldHRV,
-                                                             temp: carry.lastHeldTemp,
-                                                             spo2: carry.lastHeldSpO2))
+                                holdSeeds: .empty)
         return WatchdogWindowBuilder.build(feed)
     }
 

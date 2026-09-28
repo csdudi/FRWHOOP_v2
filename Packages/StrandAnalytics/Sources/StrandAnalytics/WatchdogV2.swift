@@ -8,6 +8,7 @@ public enum WatchdogCalibration: Sendable {
     public static let coldStartGain = 2.5
     public static let tNote = 1.0
     public static let tActive = 1.6
+    /// Spacing prior on WatchdogScores.severityJoint (clipped sum). Not wearer-fit.
     public static let tSevere = 2.4
     public static let persistTicks = 2
     public static let escalateDelta = 0.5
@@ -112,10 +113,12 @@ public enum WatchdogQuality: Sendable {
         family == .whoop5 ? WatchdogConfig.whoop5FreshnessSeconds : WatchdogConfig.whoop4FreshnessSeconds
     }
 
-    public static func gate(_ window: WatchdogWindow) -> WatchdogUnavailable? {
+    public static func gate(_ window: WatchdogWindow, tail: WatchdogLiveTail? = nil) -> WatchdogUnavailable? {
         if bucketCoverage(window) + 1e-9 < WatchdogConfig.minCoverage { return .coverage }
         if window.newestAgeSeconds > freshnessLimit(window.family) { return .stale }
         if maxEmptyMinutes(window.hr) >= WatchdogCalibration.maxEmptyMinutes { return .gap }
+        let live = tail ?? WatchdogLiveTail.resolve(window)
+        if live.thinRestCoverage(window.hr) { return .coverage }
         return nil
     }
 }
@@ -137,10 +140,11 @@ public enum WatchdogAdaptive: Sendable {
                              lastTemp: (obs: Double, hat: Double)?,
                              lastResp: (obs: Double, hat: Double)?,
                              lastSpO2: (obs: Double, hat: Double)?,
-                             carry: inout WatchdogCarry) -> UniTSResidual {
+                             carry: inout WatchdogCarry,
+                             tail: WatchdogLiveTail? = nil) -> UniTSResidual {
         var out = residual
-        let artifact = WatchdogActivityRuntime.isArtifact(window.activityLogits)
-        let still = WatchdogActivityRuntime.isStillish(window.activityLogits)
+        let live = tail ?? WatchdogLiveTail.resolve(window)
+        let artifact = WatchdogActivityRuntime.isArtifact(window.activityLogits, from: live.startIndex)
         func absr(_ p: (obs: Double, hat: Double)?) -> Double {
             guard let p else { return 0 }
             return abs(p.obs - p.hat)
@@ -157,7 +161,14 @@ public enum WatchdogAdaptive: Sendable {
             lastZ(lastResp, scale: residual.scaleResp),
             lastZ(lastSpO2, scale: residual.scaleSpO2)
         )
-        if residual.jointEnergy < WatchdogCalibration.tNote || lastBandZ < 1.0 {
+        let tailJoint = live.energy(obs: window.hr, hat: residual.reconstructedHR,
+                                    scale: residual.scaleHR, floor: WatchdogConfig.hrScale)
+        if live.period == .rest, live.previousPeriod == .effort {
+            carry.quietAbsHR = 0; carry.quietAbsRHR = 0; carry.quietAbsHRV = 0
+            carry.quietAbsTemp = 0; carry.quietAbsResp = 0; carry.quietAbsSpO2 = 0
+            carry.quietN = 0
+        }
+        if tailJoint < WatchdogCalibration.tNote || lastBandZ < 1.0 {
             let a = quietEma
             carry.quietAbsHR = (1 - a) * carry.quietAbsHR + a * absr(lastHR)
             carry.quietAbsRHR = (1 - a) * carry.quietAbsRHR + a * absr(lastRHR)
@@ -168,63 +179,55 @@ public enum WatchdogAdaptive: Sendable {
             carry.quietN += 1
         }
         let art = artifact ? artifactGain : 1.0
-        var corr = 1.0
-        if still {
-            let hrE = residual.energy(for: .hr)
-            let hrvE = residual.energy(for: .hrv)
-            if hrE >= WatchdogCalibration.tNote && hrvE < 0.35 { corr = 1.35 }
-            if hrE >= WatchdogCalibration.tNote && hrvE >= WatchdogCalibration.tNote { corr = 0.90 }
+        func bump(_ scale: [Double]) -> [Double] {
+            scale.map { $0 * art }
         }
-        func bump(_ scale: [Double], quiet: Double) -> [Double] {
-            let floor = carry.quietN >= 8 ? quiet : 0
-            return scale.map { max($0, floor) * art * corr }
-        }
-        let oldHR = out.scaleHR.last ?? 1
-        let oldRHR = out.scaleRHR.last ?? 1
-        let oldHRV = out.scaleHRV.last ?? 1
-        let oldTemp = out.scaleTemp.last ?? 1
-        let oldResp = out.scaleResp.last ?? 1
-        let oldSpO2 = out.scaleSpO2.last ?? 1
-        out.scaleHR = bump(out.scaleHR, quiet: carry.quietAbsHR)
-        out.scaleRHR = bump(out.scaleRHR, quiet: carry.quietAbsRHR)
-        out.scaleHRV = bump(out.scaleHRV, quiet: carry.quietAbsHRV)
-        out.scaleTemp = bump(out.scaleTemp, quiet: carry.quietAbsTemp)
-        out.scaleResp = bump(out.scaleResp, quiet: carry.quietAbsResp)
-        out.scaleSpO2 = bump(out.scaleSpO2, quiet: carry.quietAbsSpO2)
-        func rescale(_ e: Double, old: Double, new: Double) -> Double {
-            e * (max(old, 0.01) / max(new, 0.01))
-        }
-        var energy = out.energy
-        energy[.hr] = rescale(residual.energy(for: .hr), old: oldHR, new: out.scaleHR.last ?? oldHR)
-        energy[.rhr] = rescale(residual.energy(for: .rhr), old: oldRHR, new: out.scaleRHR.last ?? oldRHR)
-        energy[.hrv] = rescale(residual.energy(for: .hrv), old: oldHRV, new: out.scaleHRV.last ?? oldHRV)
-        energy[.temp] = rescale(residual.energy(for: .temp), old: oldTemp, new: out.scaleTemp.last ?? oldTemp)
-        energy[.resp] = rescale(residual.energy(for: .resp), old: oldResp, new: out.scaleResp.last ?? oldResp)
-        energy[.spo2] = rescale(residual.energy(for: .spo2), old: oldSpO2, new: out.scaleSpO2.last ?? oldSpO2)
-        out.energy = energy
+        out.scaleHR = bump(out.scaleHR)
+        out.scaleRHR = bump(out.scaleRHR)
+        out.scaleHRV = bump(out.scaleHRV)
+        out.scaleTemp = bump(out.scaleTemp)
+        out.scaleResp = bump(out.scaleResp)
+        out.scaleSpO2 = bump(out.scaleSpO2)
         out.rangeHalf[.hr] = out.scaleHR.last ?? residual.rangeHalf(for: .hr)
         out.rangeHalf[.rhr] = out.scaleRHR.last ?? residual.rangeHalf(for: .rhr)
         out.rangeHalf[.hrv] = out.scaleHRV.last ?? residual.rangeHalf(for: .hrv)
         out.rangeHalf[.temp] = out.scaleTemp.last ?? residual.rangeHalf(for: .temp)
         out.rangeHalf[.resp] = out.scaleResp.last ?? residual.rangeHalf(for: .resp)
         out.rangeHalf[.spo2] = out.scaleSpO2.last ?? residual.rangeHalf(for: .spo2)
-        var dummy = Array(repeating: 0.0, count: 6)
-        let raw: [Double?] = [
-            energy[.hr], energy[.rhr], energy[.hrv], energy[.temp], energy[.resp], energy[.spo2]
-        ]
-        let dir = WatchdogDirection.compute(rawR: raw, rhrAllowed: still,
-                                            artifact: artifact, dirEma: &dummy)
-        out.jointEnergy = dir.joint
+        out.jointEnergy = residual.jointEnergy
         return out
     }
 }
 
 public enum WatchdogScores: Sendable {
-    /// Unsigned RMS of present energies. Not `max`. Prefer `WatchdogDirection` for live joint.
+    /// One channel cannot donate more than this to the model severe door.
+    public static let severityChannelCap = 1.0
+    /// Same damp as the tanh label fold. Artifact must not open model-severe alone.
+    public static let severityArtifactGain = 0.72
+    /// RHR is a still lookback of HR, not a second metric in the add-up.
+    public static let rhrSeverityIndex = 1
+
+    /// Unsigned RMS of present energies. Residual packaging only. Not the live severe door.
     public static func joint(energies: [Double]) -> Double {
         let xs = energies.filter { $0.isFinite }
         guard !xs.isEmpty else { return 0 }
         return sqrt(xs.reduce(0) { $0 + $1 * $1 } / Double(xs.count))
+    }
+
+    /// Model combined score vs tNote / tActive / tSevere.
+    ///
+    /// `J = Σ min(|r_k|, 1.0)` over present channels except RHR, then ×0.72 if artifact.
+    /// One vital ≤ 1.0 (cannot hit 2.4). Two ≤ 2.0 (active band). Three near 1.0 can severe.
+    public static func severityJoint(absR: [Double], mask: [Bool], artifact: Bool) -> Double {
+        let n = min(absR.count, mask.count, WatchdogDirection.channelCount)
+        var sum = 0.0
+        for k in 0..<n {
+            if k == rhrSeverityIndex { continue }
+            guard mask[k], absR[k].isFinite else { continue }
+            sum += min(max(absR[k], 0), severityChannelCap)
+        }
+        if artifact { sum *= severityArtifactGain }
+        return sum
     }
 
     public static func fused(recon: Double, forecast: Double) -> Double {
@@ -295,22 +298,58 @@ public enum WatchdogNotifyPolicy: Sendable {
     }
 }
 
+/// One TimesFM (or hold-display) horizon. Early uses this only when `studentOk`.
+public struct WatchdogForecastStep: Equatable, Sendable {
+    public var energy: Double
+    public var nextHR: [Double]
+    public var nextHRV: [Double]
+    public var nextTemp: [Double]
+    public var nextResp: [Double]
+    public var nextRHR: [Double]
+    public var nextSpO2: [Double]
+    public var ranStudent: Bool
+    public var studentOk: Bool
+
+    public static let empty = WatchdogForecastStep(
+        energy: 0, nextHR: [], nextHRV: [], nextTemp: [], nextResp: [],
+        nextRHR: [], nextSpO2: [], ranStudent: false, studentOk: false)
+
+    public var cube: [[Double]] {
+        [nextHR, nextRHR, nextHRV, nextTemp, nextResp, nextSpO2]
+    }
+}
+
+public struct WatchdogForecastPathScore: Equatable, Sendable {
+    public var labelJoint: Double
+    public var severityJoint: Double
+    public var hotChannels: Int
+    public var stepsAboveNote: Int
+    public var complete: Bool
+    public static let zero = WatchdogForecastPathScore(
+        labelJoint: 0, severityJoint: 0, hotChannels: 0, stepsAboveNote: 0, complete: false)
+}
+
 /// TimesFM-style on-device forecast student (patched causal decoder).
 /// Teacher recipe is google-research/timesfm (`google/timesfm-3.0-pytorch`);
 /// the App Store binary loads `TimesFM3_Student.mlpackage`, not the 330M weights.
 public struct WatchdogForecastRuntime: Sendable {
     public static let modelVersion = WatchdogConfig.forecastModelVersion
+    /// Test hook. `nil` = live Core ML. `.some(nil)` = force fail. `.some(cube)` = inject 6×5.
+    static var testPredict: [[Double]]??
+
+    public static let earlyTrustFloor = 35
 
     public func step(window: WatchdogWindow, residual: UniTSResidual,
                      prompt: UniTSPrompt = UniTSPrompt(),
                      carry: WatchdogCarry,
-                     nowUnix: Int = 0) -> (energy: Double, nextHR: [Double], nextHRV: [Double],
-                                           nextTemp: [Double], nextResp: [Double],
-                                           nextRHR: [Double], nextSpO2: [Double], ranStudent: Bool) {
+                     nowUnix: Int = 0,
+                     tail: WatchdogLiveTail? = nil) -> WatchdogForecastStep {
         let h = WatchdogCalibration.forecastHorizon
-        func lastObs(_ obs: [Double?], _ scale: [Double]) -> (obs: [Double], sig: [Double]) {
+        let from = (tail ?? WatchdogLiveTail.resolve(window)).startIndex
+        func lastObs(_ obs: [Double?], _ scale: [Double], from start: Int) -> (obs: [Double], sig: [Double]) {
             var pairs: [(Double, Double)] = []
-            for i in 0..<obs.count {
+            let lo = min(max(0, start), obs.count)
+            for i in lo..<obs.count {
                 if let o = obs[i] {
                     let s = i < scale.count ? scale[i] : 1
                     pairs.append((o, max(s, 0.01)))
@@ -329,39 +368,43 @@ public struct WatchdogForecastRuntime: Sendable {
             }
             return z.max() ?? 0
         }
-        let hr = lastObs(window.hr, residual.scaleHR)
-        let rhr = lastObs(window.rhr, residual.scaleRHR)
-        let hrv = lastObs(window.hrv, residual.scaleHRV)
-        let temp = lastObs(window.temp, residual.scaleTemp)
-        let resp = lastObs(window.resp, residual.scaleResp)
-        let spo2 = lastObs(window.spo2, residual.scaleSpO2)
+        let hr = lastObs(window.hr, residual.scaleHR, from: from)
+        let rhr = lastObs(window.rhr, residual.scaleRHR, from: from)
+        let hrv = lastObs(window.hrv, residual.scaleHRV, from: from)
+        let temp = lastObs(window.temp, residual.scaleTemp, from: from)
+        let resp = lastObs(window.resp, residual.scaleResp, from: from)
+        let spo2 = lastObs(window.spo2, residual.scaleSpO2, from: from)
 
         var e = 0.0
-        if carry.lastForecastHR.count == h {
+        if carry.forecastStudentOk, carry.lastForecastHR.count == h {
             e = max(e, energy(obs: hr.obs, pred: Array(carry.lastForecastHR.prefix(hr.obs.count)), sig: hr.sig))
         }
-        if carry.lastForecastHRV.count == h {
+        if carry.forecastStudentOk, carry.lastForecastHRV.count == h {
             e = max(e, energy(obs: hrv.obs, pred: Array(carry.lastForecastHRV.prefix(hrv.obs.count)), sig: hrv.sig))
         }
-        if carry.lastForecastTemp.count == h {
+        if carry.forecastStudentOk, carry.lastForecastTemp.count == h {
             e = max(e, energy(obs: temp.obs, pred: Array(carry.lastForecastTemp.prefix(temp.obs.count)), sig: temp.sig))
         }
-        if carry.lastForecastResp.count == h {
+        if carry.forecastStudentOk, carry.lastForecastResp.count == h {
             e = max(e, energy(obs: resp.obs, pred: Array(carry.lastForecastResp.prefix(resp.obs.count)), sig: resp.sig))
         }
-        if carry.lastForecastRHR.count == h {
+        if carry.forecastStudentOk, carry.lastForecastRHR.count == h {
             e = max(e, energy(obs: rhr.obs, pred: Array(carry.lastForecastRHR.prefix(rhr.obs.count)), sig: rhr.sig))
         }
-        if carry.lastForecastSpO2.count == h {
+        if carry.forecastStudentOk, carry.lastForecastSpO2.count == h {
             e = max(e, energy(obs: spo2.obs, pred: Array(carry.lastForecastSpO2.prefix(spo2.obs.count)), sig: spo2.sig))
         }
 
-        let skipStudent = nowUnix > 0 && carry.lastForecastUnix > 0
+        let skipStudent = nowUnix > 0 && carry.forecastStudentOk
+            && carry.lastForecastUnix > 0
             && (nowUnix - carry.lastForecastUnix) < 60
-            && carry.lastForecastHR.count == h
+            && Self.completeCube(carry.lastForecastHR, carry.lastForecastRHR, carry.lastForecastHRV,
+                                 carry.lastForecastTemp, carry.lastForecastResp, carry.lastForecastSpO2)
         if skipStudent {
-            return (e, carry.lastForecastHR, carry.lastForecastHRV, carry.lastForecastTemp,
-                    carry.lastForecastResp, carry.lastForecastRHR, carry.lastForecastSpO2, false)
+            return WatchdogForecastStep(energy: e, nextHR: carry.lastForecastHR, nextHRV: carry.lastForecastHRV,
+                                        nextTemp: carry.lastForecastTemp, nextResp: carry.lastForecastResp,
+                                        nextRHR: carry.lastForecastRHR, nextSpO2: carry.lastForecastSpO2,
+                                        ranStudent: false, studentOk: true)
         }
 
         func hold(_ hat: [Double?]) -> [Double] {
@@ -397,12 +440,120 @@ public struct WatchdogForecastRuntime: Sendable {
             bases[4] ?? WatchdogPopulationPriors.resp,
             bases[5] ?? WatchdogPopulationPriors.spo2
         ]
-        if let forecast = TimesFMStudentSession.shared.predict(history: history, prompt: promptVec, occupancy: occ),
-           forecast.count == 6, forecast.allSatisfy({ $0.count == h }) {
-            return (e, forecast[0], forecast[2], forecast[3], forecast[4], forecast[1], forecast[5], true)
+        let predicted: [[Double]]?
+        if let override = Self.testPredict {
+            predicted = override
+        } else {
+            predicted = TimesFMStudentSession.shared.predict(history: history, prompt: promptVec, occupancy: occ)
         }
-        return (e, hold(residual.reconstructedHR), hold(residual.reconstructedHRV),
-                hold(residual.reconstructedTemp), hold(residual.reconstructedResp),
-                hold(residual.reconstructedRHR), hold(residual.reconstructedSpO2), true)
+        if let forecast = predicted,
+           Self.completeCube(forecast) {
+            return WatchdogForecastStep(energy: e, nextHR: forecast[0], nextHRV: forecast[2],
+                                        nextTemp: forecast[3], nextResp: forecast[4],
+                                        nextRHR: forecast[1], nextSpO2: forecast[5],
+                                        ranStudent: true, studentOk: true)
+        }
+        return WatchdogForecastStep(energy: e, nextHR: hold(residual.reconstructedHR),
+                                    nextHRV: hold(residual.reconstructedHRV),
+                                    nextTemp: hold(residual.reconstructedTemp),
+                                    nextResp: hold(residual.reconstructedResp),
+                                    nextRHR: hold(residual.reconstructedRHR),
+                                    nextSpO2: hold(residual.reconstructedSpO2),
+                                    ranStudent: false, studentOk: false)
+    }
+
+    public static func completeCube(_ planes: [[Double]]) -> Bool {
+        let h = WatchdogCalibration.forecastHorizon
+        return planes.count == 6 && planes.allSatisfy({ $0.count == h && $0.allSatisfy(\.isFinite) })
+    }
+
+    public static func completeCube(_ hr: [Double], _ rhr: [Double], _ hrv: [Double],
+                                    _ temp: [Double], _ resp: [Double], _ spo2: [Double]) -> Bool {
+        completeCube([hr, rhr, hrv, temp, resp, spo2])
+    }
+
+    /// Path leaving the prompt corridor. Not lastObs − pred[0]. Hold cubes score 0.
+    public static func pathScore(_ step: WatchdogForecastStep, usual: [Double], scales: [Double],
+                                 artifact: Bool = false) -> WatchdogForecastPathScore {
+        guard step.studentOk else { return .zero }
+        return pathScore(cube: step.cube, usual: usual, scales: scales, artifact: artifact)
+    }
+
+    public static func pathScore(cube: [[Double]], usual: [Double], scales: [Double],
+                                 artifact: Bool = false) -> WatchdogForecastPathScore {
+        let h = WatchdogCalibration.forecastHorizon
+        guard completeCube(cube), usual.count >= 6, scales.count >= 6 else { return .zero }
+        var labelJs: [Double] = []
+        var sevJs: [Double] = []
+        var maxAbs = Array(repeating: 0.0, count: 6)
+        var stepsAbove = 0
+        for t in 0..<h {
+            var raw: [Double?] = Array(repeating: nil, count: 6)
+            var leaving = 0
+            for k in 0..<6 {
+                let sig = max(scales[k], 0.01)
+                let r = (cube[k][t] - usual[k]) / sig
+                raw[k] = r
+                maxAbs[k] = max(maxAbs[k], abs(r))
+                if k != WatchdogScores.rhrSeverityIndex, abs(r) >= WatchdogCalibration.tNote {
+                    leaving += 1
+                }
+            }
+            if leaving >= 2 { stepsAbove += 1 }
+            var ema = Array(repeating: 0.0, count: 6)
+            let dir = WatchdogDirection.compute(rawR: raw, rhrAllowed: false, artifact: artifact,
+                                                dirEma: &ema)
+            labelJs.append(dir.joint)
+            sevJs.append(dir.severityJoint)
+        }
+        var hot = 0
+        for k in 0..<6 where k != WatchdogScores.rhrSeverityIndex {
+            if maxAbs[k] >= WatchdogCalibration.tNote { hot += 1 }
+        }
+        guard hot >= 2, stepsAbove >= 2 else {
+            return WatchdogForecastPathScore(labelJoint: 0, severityJoint: 0,
+                                             hotChannels: hot, stepsAboveNote: stepsAbove, complete: true)
+        }
+        // Tanh fold dilutes two-of-five channels below tNote. Path Early uses the
+        // clipped-sum door (RHR out), same add-up as recon severity.
+        let sev = median(sevJs)
+        return WatchdogForecastPathScore(labelJoint: sev, severityJoint: sev,
+                                         hotChannels: hot, stepsAboveNote: stepsAbove, complete: true)
+    }
+
+    /// Corridor the path is leaving: last UniTS hat, then the live prompt. Not lastObs.
+    public static func pathCenter(residual: UniTSResidual, prompt: UniTSPrompt) -> [Double] {
+        func last(_ xs: [Double?], _ fallback: Double) -> Double {
+            xs.reversed().compactMap { $0 }.first ?? fallback
+        }
+        let bases = [
+            prompt.hr ?? WatchdogPopulationPriors.hr,
+            prompt.rhr ?? WatchdogPopulationPriors.rhr,
+            prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv,
+            prompt.temp ?? WatchdogPopulationPriors.temp,
+            prompt.resp ?? WatchdogPopulationPriors.resp,
+            prompt.spo2 ?? WatchdogPopulationPriors.spo2
+        ]
+        return [
+            last(residual.reconstructedHR, bases[0]),
+            last(residual.reconstructedRHR, bases[1]),
+            last(residual.reconstructedHRV, bases[2]),
+            last(residual.reconstructedTemp, bases[3]),
+            last(residual.reconstructedResp, bases[4]),
+            last(residual.reconstructedSpO2, bases[5])
+        ]
+    }
+
+    public static func wearerEarly(pathJ: Double, allowed: Bool, severity: WatchdogSeverity,
+                                   trustPct: Int, persistTicks: Int) -> Bool {
+        guard allowed, severity != .severe, severity != .active else { return false }
+        guard trustPct >= earlyTrustFloor else { return false }
+        return pathJ >= WatchdogCalibration.tNote && persistTicks >= WatchdogCalibration.persistTicks
+    }
+
+    static func median(_ xs: [Double]) -> Double {
+        let s = xs.filter(\.isFinite).sorted()
+        guard !s.isEmpty else { return 0 }
+        return s[s.count / 2]
     }
 }

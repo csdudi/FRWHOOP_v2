@@ -161,43 +161,9 @@ final class BaselineStore: ObservableObject {
             .filter { $0.qualityStatus == .ok }.count
     }
 
+    /// Scoring tape only. Stub series (no DailyMetric column) stay empty — never +6 / ×0.88 / −0.2.
     func observations(from days: [DailyMetric], series: LBSeries) -> [LBDailyObservation] {
-        if series.hasDailyMetricColumn {
-            return LongitudinalBaseline.observations(from: days, series: series)
-        }
-        return days.map { day in
-            let native = Self.synthesizedNative(from: day, series: series)
-            return LBDailyObservation(
-                day: day.day,
-                value: native,
-                qualityStatus: native == nil ? .missing : .ok,
-                coverage: native == nil ? nil : Self.demoCoverage(series: series),
-                streamPresent: native != nil)
-        }
-    }
-
-    /// Demo-only stand-ins so Rest / Active / All day can draw until those windows exist on DailyMetric.
-    static func synthesizedNative(from day: DailyMetric, series: LBSeries) -> Double? {
-        switch series {
-        case .awakeRestHR: return day.restingHr.map { Double($0) + 6 }
-        case .awakeActiveHR: return day.restingHr.map { Double($0) + 32 }
-        case .continuousHR: return day.restingHr.map { Double($0) + 14 }
-        case .awakeRestHRVLn: return day.avgHrv.map { $0 * 0.88 }
-        case .awakeActiveHRVLn: return day.avgHrv.map { $0 * 0.58 }
-        case .continuousHRVLn: return day.avgHrv.map { $0 * 0.72 }
-        case .awakeRestSpO2Mean: return day.spo2Pct.map { $0 - 0.2 }
-        case .awakeActiveSpO2Mean: return day.spo2Pct.map { $0 - 0.7 }
-        case .continuousSpO2Mean: return day.spo2Pct.map { $0 - 0.3 }
-        default: return nil
-        }
-    }
-
-    static func demoCoverage(series: LBSeries) -> Double {
-        switch series {
-        case .continuousHR, .continuousHRVLn: return 300
-        case .awakeRestSpO2Mean, .awakeActiveSpO2Mean, .continuousSpO2Mean: return 12
-        default: return 45
-        }
+        LongitudinalBaseline.observations(from: days, series: series)
     }
 
     var card: LBCardCopy { evaluation?.trial.card ?? .monitoring(building: true) }

@@ -65,19 +65,78 @@ public struct WatchdogPhaseUsualStore: Equatable, Sendable, Codable {
 
     public func mature(_ key: WatchdogPhaseKey) -> WatchdogPhaseEntry? {
         guard let e = entries[key.id], e.nDays >= Self.matureDays else { return nil }
+        guard Self.isNativeVitalCenter(e.center) else { return nil }
         return e
     }
 
-    public mutating func writeDay(key: WatchdogPhaseKey, dayMedian: [Double], civilDay: String) {
+    /// Residual-scale centers (typical |r| 0.2–2) must never blend into bpm / °C prompts.
+    public static func isNativeVitalCenter(_ center: [Double]) -> Bool {
+        guard center.count == 6, center.allSatisfy(\.isFinite) else { return false }
+        if center[0] > 0 && center[0] < 8 { return false }
+        if center[3] > 0 && center[3] < 20 { return false }
+        if center[0] == 0 && center[3] == 0 { return false }
+        return true
+    }
+
+    public mutating func dropResidualScaleCenters() {
+        for (id, e) in entries where !Self.isNativeVitalCenter(e.center) {
+            entries[id] = nil
+        }
+    }
+
+    public static func parseKey(_ id: String) -> WatchdogPhaseKey? {
+        let parts = id.split(separator: "×", maxSplits: 1).map(String.init)
+        guard parts.count == 2,
+              let phase = WatchdogPhase(rawValue: parts[0]),
+              let family = WatchdogActivityFamily(rawValue: parts[1]) else { return nil }
+        return WatchdogPhaseKey(phase: phase, family: family)
+    }
+
+    /// Band-eligible still ticks only. Never a leftover workout family.
+    public static func qualifyingStillKeys(ticks: [String: Int]) -> [WatchdogPhaseKey] {
+        ticks.compactMap { id, n -> WatchdogPhaseKey? in
+            guard n >= 12, let key = parseKey(id), key.family == .still else { return nil }
+            return key
+        }
+    }
+
+    public static func dominantStillKey(ticks: [String: Int]) -> WatchdogPhaseKey? {
+        let eligible = ticks.compactMap { id, n -> (WatchdogPhaseKey, Int)? in
+            guard n >= 12, let key = parseKey(id), key.family == .still else { return nil }
+            return (key, n)
+        }
+        return eligible.max(by: { $0.1 < $1.1 })?.0
+    }
+
+    public mutating func writeDay(key: WatchdogPhaseKey, dayMedian: [Double],
+                                  present: [Bool]? = nil, civilDay: String) {
         guard key.family != .other else { return }
         guard dayMedian.count == 6, dayMedian.allSatisfy(\.isFinite) else { return }
+        let mask = present ?? Array(repeating: true, count: 6)
+        guard mask.count == 6 else { return }
+        var gated = dayMedian
+        for i in 0..<6 where !mask[i] { gated[i] = 0 }
+        let hrOk = mask[0] && dayMedian[0] > 0
+        let tempOk = mask[3] && dayMedian[3] > 0
+        if !hrOk && !tempOk { return }
+        guard Self.isNativeVitalCenter(gated) else { return }
         var e = entries[key.id] ?? WatchdogPhaseEntry()
         if e.updatedDay == civilDay { return }
         if e.nDays == 0 {
-            e.center = dayMedian
+            e.center = gated
             e.mad = Array(repeating: 0, count: 6)
         } else {
-            e.center = zip(e.center, dayMedian).map { 0.85 * $0 + Self.dailyGain * $1 }
+            let prev = e.center
+            e.center = (0..<6).map { i in
+                guard mask[i], i < e.center.count else { return i < e.center.count ? e.center[i] : 0 }
+                return 0.85 * e.center[i] + Self.dailyGain * dayMedian[i]
+            }
+            e.mad = (0..<6).map { i in
+                guard mask[i], i < e.mad.count, i < prev.count else {
+                    return i < e.mad.count ? e.mad[i] : 0
+                }
+                return 0.85 * e.mad[i] + Self.dailyGain * abs(dayMedian[i] - prev[i])
+            }
         }
         e.nDays += 1
         e.updatedDay = civilDay
@@ -85,26 +144,73 @@ public struct WatchdogPhaseUsualStore: Equatable, Sendable, Codable {
     }
 
     public func blendPrompt(_ prompt: UniTSPrompt, key: WatchdogPhaseKey) -> UniTSPrompt {
-        guard let e = mature(key), e.center.count == 6 else { return prompt }
+        let stillKey = WatchdogPhaseKey(phase: key.phase, family: .still)
+        let stillE = mature(stillKey)
+        let keyE = mature(key)
+        if stillE == nil && keyE == nil { return prompt }
         var out = prompt
-        func mix(_ layer: Double?, _ idx: Int) -> Double? {
-            guard let layer else { return e.center[idx] }
-            return (1 - Self.blendSidecar) * layer + Self.blendSidecar * e.center[idx]
+        func sidecar(_ e: WatchdogPhaseEntry?, _ idx: Int) -> Double? {
+            guard let e, idx < e.center.count else { return nil }
+            let v = e.center[idx]
+            guard v.isFinite, v > 0 else { return nil }
+            return v
         }
-        out.hr = mix(prompt.hr, 0)
-        out.rhr = mix(prompt.rhr, 1)
-        out.hrv = mix(prompt.hrv, 2)
-        out.temp = mix(prompt.temp, 3)
-        out.resp = mix(prompt.resp, 4)
-        out.spo2 = mix(prompt.spo2, 5)
+        func mix(_ layer: Double?, _ s: Double?) -> Double? {
+            guard let s else { return layer }
+            guard let layer else { return s }
+            return (1 - Self.blendSidecar) * layer + Self.blendSidecar * s
+        }
+        func fill(_ layer: Double?, _ s: Double?) -> Double? {
+            layer ?? s
+        }
+        out.hr = mix(prompt.hr, sidecar(stillE ?? keyE, 0))
+        if key.phase == .sleep {
+            out.rhr = mix(prompt.rhr, sidecar(keyE, 1))
+            out.hrv = mix(prompt.hrv, sidecar(keyE, 2))
+            out.temp = mix(prompt.temp, sidecar(keyE, 3))
+            out.resp = mix(prompt.resp, sidecar(keyE, 4))
+            out.spo2 = mix(prompt.spo2, sidecar(keyE, 5))
+        } else {
+            if prompt.hrvAwake != nil {
+                out.hrvAwake = mix(prompt.hrvAwake, sidecar(stillE, 2))
+            }
+            out.temp = fill(prompt.temp, sidecar(stillE, 3))
+            out.resp = fill(prompt.resp, sidecar(stillE, 4))
+            out.spo2 = fill(prompt.spo2, sidecar(stillE, 5))
+        }
         return out
     }
 }
 
+/// One medium-band slot. Keyed by the existing `WatchdogPhaseKey.id` — not a new activity type.
+public struct WatchdogBandState: Equatable, Sendable, Codable {
+    public var q: [Double]
+    public var anchor: [Double]
+    public var n: Int
+    public var ready: Bool
+    public var scale: [Double]
+    public var lastUnix: Int
+
+    public static let empty = WatchdogBandState()
+
+    public init(q: [Double] = Array(repeating: 0, count: 6),
+                anchor: [Double] = Array(repeating: 1, count: 6),
+                n: Int = 0, ready: Bool = false,
+                scale: [Double] = Array(repeating: 1, count: 6),
+                lastUnix: Int = 0) {
+        self.q = q
+        self.anchor = anchor
+        self.n = n
+        self.ready = ready
+        self.scale = scale
+        self.lastUnix = lastUnix
+    }
+}
+
 /// Green band: small weighted steps. Not frozen, not yanked by one minute.
-/// `q` accumulates typical |r| on eligible still minutes. After 14 minutes, `anchor` is
-/// that first typical width. Scale is `q / anchor`, stepped by at most `stepMax` and
-/// clamped to 0.75…1.40 so the range can drift but cannot go loose.
+/// `q` accumulates typical |r| on eligible minutes of one existing PhaseKey.
+/// After 14 minutes, `anchor` is that first typical width. Scale is `q / anchor`,
+/// stepped by at most `stepMax` and clamped to 0.75…1.40.
 public enum WatchdogBand: Sendable {
     public static let version = "band-v2-medium"
     public static let targetLo = 0.90
@@ -119,9 +225,25 @@ public enum WatchdogBand: Sendable {
     /// Max |Δscale| on one eligible tick.
     public static let stepMax = 0.02
     public static let nCap = 14 * 24 * 3
+    public static let minuteSeconds = 60
 
     public static func alpha(nElig: Int) -> Double {
         2 / Double(min(max(nElig, 1), nCap) + 1)
+    }
+
+    public static func learnable(_ label: WatchdogEventLabel) -> Bool {
+        switch label {
+        case .normalSleep, .normalStillAwake,
+             .workoutWalk, .workoutRun, .workoutCycle, .workoutLift,
+             .postWorkout:
+            return true
+        default:
+            return false
+        }
+    }
+
+    public static func shouldCountMinute(nowUnix: Int, lastUnix: Int) -> Bool {
+        lastUnix <= 0 || nowUnix - lastUnix >= minuteSeconds
     }
 
     public static func update(absResidual: [Double], eligible: Bool,
@@ -135,13 +257,16 @@ public enum WatchdogBand: Sendable {
     public static func update(absResidual: [Double], eligible: Bool,
                               q: inout [Double], anchor: inout [Double],
                               n: inout Int, initialized: inout Bool,
-                              scale: inout [Double]) -> [Double] {
+                              scale: inout [Double],
+                              nowUnix: Int = 0, lastUnix: inout Int) -> [Double] {
         if q.count < 6 { q = Array(repeating: 0, count: 6) }
         if anchor.count < 6 { anchor = Array(repeating: 1, count: 6) }
         if scale.count < 6 { scale = Array(repeating: 1, count: 6) }
         guard eligible, absResidual.count >= 6 else { return scale }
         if absResidual.contains(where: { $0 >= residualCap }) { return scale }
+        if nowUnix > 0, !shouldCountMinute(nowUnix: nowUnix, lastUnix: lastUnix) { return scale }
         n += 1
+        if nowUnix > 0 { lastUnix = nowUnix }
         let a = alpha(nElig: n)
         for k in 0..<6 {
             let x = min(max(absResidual[k], 0), learnCap)
@@ -163,6 +288,22 @@ public enum WatchdogBand: Sendable {
             scale[k] = min(clampHi, max(clampLo, prev + delta))
         }
         return scale
+    }
+
+    public static func update(absResidual: [Double], eligible: Bool,
+                              q: inout [Double], anchor: inout [Double],
+                              n: inout Int, initialized: inout Bool,
+                              scale: inout [Double]) -> [Double] {
+        var last = 0
+        return update(absResidual: absResidual, eligible: eligible, q: &q, anchor: &anchor,
+                      n: &n, initialized: &initialized, scale: &scale, nowUnix: 0, lastUnix: &last)
+    }
+
+    public static func update(_ state: inout WatchdogBandState, absResidual: [Double],
+                              eligible: Bool, nowUnix: Int) -> [Double] {
+        update(absResidual: absResidual, eligible: eligible, q: &state.q, anchor: &state.anchor,
+               n: &state.n, initialized: &state.ready, scale: &state.scale,
+               nowUnix: nowUnix, lastUnix: &state.lastUnix)
     }
 
     public static func apply(_ scales: [Double], to values: [Double]) -> [Double] {

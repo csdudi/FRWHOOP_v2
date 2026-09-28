@@ -29,7 +29,8 @@ final class WatchdogV25SelfLabelTests: XCTestCase {
         let unknown = WatchdogEventMemory.signature(d: [0.1, 0, 0, 0, 0, 0], reconJ: 0.2,
                                                     forecastJ: 0.1, cls: .unknown, spo2Abs: 0)
         let named = mem.observe(teacher: .normalStillAwake, explained: true, sig: unknown)
-        XCTAssertEqual(named, .workoutWalk)
+        XCTAssertNotEqual(named, .workoutWalk)
+        XCTAssertEqual(named, .normalStillAwake)
     }
 
     func testMemoryCannotTurnLoudReconIntoWorkout() {

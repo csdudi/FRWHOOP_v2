@@ -53,6 +53,10 @@ public final class LiveState: ObservableObject {
     /// radio-off / connect-fail / disconnect). Twin of the Android LiveState.streamingLiveHR.
     @Published public var streamingLiveHR: Bool = false
     @Published public var heartRate: Int? = nil
+    /// Wall-clock of the last *real* HR packet (0x2A37 / realtime / contact detected).
+    /// Not `@Published`: same-bpm packets must still advance this clock without a UI restamp.
+    public private(set) var lastHeartRatePacketUnix: Int?
+    public private(set) var lastHeartRatePacketBpm: Int?
     /// Whether the heavy R10/R11 realtime burst is currently armed (the "live feed"). Tracks the
     /// realtime INTENT (startRealtime/stopRealtime), NOT `heartRate` — the lightweight 0x2A37 profile
     /// keeps setting heartRate while bonded, so a heartRate-driven toggle could never read "off". The
@@ -598,6 +602,16 @@ public final class LiveState: ObservableObject {
     /// intervals onto the bounded `rrRecent` rolling buffer so the Live console can show a moving
     /// strip. Non-positive sentinels (a strap "no interval this beat" placeholder) are dropped from the
     /// rolling buffer. `recentLimit` caps the buffer; the oldest intervals fall off first.
+    /// Record a real HR packet without requiring a `@Published` bpm change.
+    /// Contact-not-detected packets do not advance the Watchdog freshness clock.
+    public func noteHeartRatePacket(bpm: Int, at unix: Int = Int(Date().timeIntervalSince1970),
+                                    contact: StandardHRContact? = nil) {
+        if contact == .supportedNotDetected { return }
+        guard (30...220).contains(bpm) else { return }
+        lastHeartRatePacketUnix = unix
+        lastHeartRatePacketBpm = bpm
+    }
+
     public func setRRIntervals(_ intervals: [Int], recentLimit: Int = 60) {
         rr = intervals
         rrSeq += 1
@@ -614,6 +628,8 @@ public final class LiveState: ObservableObject {
     /// the `charging = nil` / `encryptedBond = false` clears on the same path.
     public func clearBiometrics() {
         heartRate = nil
+        lastHeartRatePacketUnix = nil
+        lastHeartRatePacketBpm = nil
         rr.removeAll()
         rrRecent.removeAll()
         clearBatterySamples()   // a stale runtime estimate must not outlive the link either (#713)

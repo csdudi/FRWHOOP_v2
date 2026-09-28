@@ -1,6 +1,10 @@
 import Foundation
 
 /// Equal-weight signed direction of the six vitals. No channel is privileged.
+///
+/// `joint` is the tanh × breadth **label** fold (capped at 2.0). Severity uses
+/// `severityJoint` — a clipped sum that can pass `tSevere` (2.4) when several
+/// distinct vitals are off.
 public struct WatchdogDirectionResult: Equatable, Sendable {
     public var d: [Double]
     public var mask: [Bool]
@@ -8,13 +12,15 @@ public struct WatchdogDirectionResult: Equatable, Sendable {
     public var rms: Double
     public var breadth: Double
     public var joint: Double
+    /// Σ min(|r_k|, 1.0) over present vitals except RHR. Compared to tNote / tActive / tSevere.
+    public var severityJoint: Double
     public var marks: [String]
 
     public static let empty = WatchdogDirectionResult(
         d: Array(repeating: 0, count: 6),
         mask: Array(repeating: false, count: 6),
         weights: Array(repeating: 0, count: 6),
-        rms: 0, breadth: 0, joint: 0,
+        rms: 0, breadth: 0, joint: 0, severityJoint: 0,
         marks: Array(repeating: "·", count: 6)
     )
 }
@@ -59,7 +65,13 @@ public enum WatchdogDirection: Sendable {
         let D = sqrt(max(0, meanSq))
         var J = D * (1 + beta * breadth)
         if artifact { J *= 0.72 }
-        return WatchdogDirectionResult(d: d, mask: mask, weights: w, rms: D, breadth: breadth, joint: J, marks: marks)
+        var absR = [Double](repeating: 0, count: channelCount)
+        for k in 0..<channelCount where mask[k] {
+            absR[k] = abs(r[k] ?? 0)
+        }
+        let severityJ = WatchdogScores.severityJoint(absR: absR, mask: mask, artifact: artifact)
+        return WatchdogDirectionResult(d: d, mask: mask, weights: w, rms: D, breadth: breadth,
+                                       joint: J, severityJoint: severityJ, marks: marks)
     }
 
     public static func signedR(obs: Double?, hat: Double?, scale: Double) -> Double? {

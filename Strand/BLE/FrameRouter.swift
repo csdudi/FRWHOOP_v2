@@ -96,12 +96,15 @@ public final class FrameRouter {
             // BLE_REALTIME_HR_ON, so the UI can consume it even though persistence still ignores raw43.
             // live perf: skip the publish when HR is unchanged — the raw flood carries the same HR
             // byte across many frames, so an unguarded write re-renders the whole console for nothing.
-            if let hr = parsed.parsed["heart_rate"]?.intValue, hr >= 30, hr <= 220, state.heartRate != hr {
-                state.heartRate = hr
-                // Sleep & Rest test mode (Group E): bank the live HR sample for the readout's HR-density
-                // figure. Gated on the zero-cost active() Bool, so this is a no-op when the mode is off.
-                if TestCentre.active(.sleep) {
-                    state.recordSleepLiveHr(ts: Int(Date().timeIntervalSince1970), bpm: hr)
+            if let hr = parsed.parsed["heart_rate"]?.intValue, hr >= 30, hr <= 220 {
+                state.noteHeartRatePacket(bpm: hr)
+                if state.heartRate != hr {
+                    state.heartRate = hr
+                    // Sleep & Rest test mode (Group E): bank the live HR sample for the readout's HR-density
+                    // figure. Gated on the zero-cost active() Bool, so this is a no-op when the mode is off.
+                    if TestCentre.active(.sleep) {
+                        state.recordSleepLiveHr(ts: Int(Date().timeIntervalSince1970), bpm: hr)
+                    }
                 }
             }
             // The realtime stream usually reports rr_count=0; only update R-R when this frame

@@ -218,6 +218,7 @@ final class WatchdogV2GauntletTests: XCTestCase {
         carry.lastForecastResp = Array(repeating: 14.0, count: 5)
         carry.lastForecastRHR = Array(repeating: 58.0, count: 5)
         carry.lastForecastSpO2 = Array(repeating: 97.0, count: 5)
+        carry.forecastStudentOk = true
         let diverged = WatchdogForecastRuntime().step(window: win, residual: residual,
                                                      prompt: UniTSPrompt(hr: 58, hrv: 48, temp: 33.1, resp: 14),
                                                      carry: carry)

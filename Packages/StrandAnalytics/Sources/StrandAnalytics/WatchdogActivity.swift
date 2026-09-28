@@ -18,7 +18,8 @@ public struct WatchdogIMUSample: Equatable, Sendable {
 public enum WatchdogActivityRuntime: Sendable {
     public static func embed(motion: [Double?], hr: [Double?],
                              steps: [StepSample], imu: [WatchdogIMUSample],
-                             startUnix: Int, nowUnix: Int) -> [[Double]] {
+                             startUnix: Int, nowUnix: Int,
+                             family: DeviceFamily = .whoop4) -> [[Double]] {
         let n = motion.count
         guard n > 0 else { return WatchdogActivityClass.unknownLogits(minutes: 0) }
         let span = max(nowUnix - startUnix, 1)
@@ -55,13 +56,19 @@ public enum WatchdogActivityRuntime: Sendable {
                 dynN[i] += 1
             }
         }
+        let dynMeans: [Double] = (0..<n).map { i in
+            dynN[i] > 0 ? dynSum[i] / Double(dynN[i]) : max(0, motion[i] ?? 0) * 0.4
+        }
+        let windowDynCV = cv(dynMeans.filter { $0 > 1e-6 })
+        let setRest = isSetRestCadence(dynMeans)
+        let samplesPerMin = family == .whoop5 ? 2.0 : 60.0
         var logits = (0..<n).map { i -> [Double] in
             let occ = max(0, min(1, motion[i] ?? 0))
             let ticks = max(stepN[i], 1)
             let walkF = Double(stepWalk[i]) / Double(ticks)
             let runF = Double(stepRun[i]) / Double(ticks)
             let stillF = Double(stepStill[i]) / Double(ticks)
-            let dynMean = dynN[i] > 0 ? dynSum[i] / Double(dynN[i]) : occ * 0.4
+            let dynMean = dynMeans[i]
             let dynCV: Double = {
                 guard dynN[i] > 1 else { return 0 }
                 let mean = dynMean
@@ -69,12 +76,15 @@ public enum WatchdogActivityRuntime: Sendable {
                 return mean > 1e-4 ? sqrt(var_) / mean : 0
             }()
             let gVar = gravN[i] > 0 ? gravVar[i] / Double(gravN[i]) : occ
+            let sparseSteps = Double(stepN[i]) < samplesPerMin * 0.35
             return oneHot(pick(occ: occ, dynMean: dynMean, dynCV: dynCV, gravVar: gVar,
                                walkF: walkF, runF: runF, stillF: stillF, hasTicks: stepN[i] > 0,
-                               hasImu: dynN[i] + gravN[i] > 0, hr: hr[i]))
+                               hasImu: dynN[i] + gravN[i] > 0, hr: hr[i],
+                               windowDynCV: windowDynCV, setRest: setRest, sparseSteps: sparseSteps))
         }
         blendWorkout(logits: &logits, motion: motion, hr: hr, steps: steps, imu: imu,
-                     startUnix: startUnix, nowUnix: nowUnix)
+                     startUnix: startUnix, nowUnix: nowUnix, family: family,
+                     windowDynCV: windowDynCV, setRest: setRest)
         return logits
     }
 
@@ -96,18 +106,25 @@ public enum WatchdogActivityRuntime: Sendable {
     public static func effortOccupancy(motion: [Double?], logits: [[Double]]) -> [Double] {
         let n = motion.count
         return (0..<n).map { i in
-            let mag = max(0, min(1, motion[i] ?? 0))
             let row = i < logits.count ? logits[i] : []
-            guard let idx = row.enumerated().max(by: { $0.element < $1.element })?.offset,
-                  idx < WatchdogActivityClass.allCases.count else { return mag }
-            switch WatchdogActivityClass.allCases[idx] {
+            let cls: WatchdogActivityClass
+            if let idx = row.enumerated().max(by: { $0.element < $1.element })?.offset,
+               idx < WatchdogActivityClass.allCases.count {
+                cls = WatchdogActivityClass.allCases[idx]
+            } else {
+                cls = .unknown
+            }
+            switch cls {
             case .still, .stand: return 0
             case .walk: return 0.32
             case .run: return 0.85
             case .cycleLike: return 0.55
             case .resistance: return 0.42
             case .artifact: return 0
-            case .unknown: return mag
+            case .unknown:
+                // Nil motion is unknown, not rest. Tensor stays 0; score skips these minutes (F18).
+                guard let m = motion[i] else { return 0 }
+                return max(0, min(1, m))
             }
         }
     }
@@ -125,8 +142,12 @@ public enum WatchdogActivityRuntime: Sendable {
         }
     }
 
-    public static func isArtifact(_ logits: [[Double]]) -> Bool {
-        WatchdogActivityClass.labels(logits: logits).suffix(8).contains(WatchdogActivityClass.artifact.rawValue)
+    public static func isArtifact(_ logits: [[Double]], from startIndex: Int = 0) -> Bool {
+        let labels = WatchdogActivityClass.labels(logits: logits)
+        let lo = min(max(0, startIndex), labels.count)
+        guard lo < labels.count else { return false }
+        let slice = Array(labels[lo...])
+        return slice.suffix(min(8, slice.count)).contains(WatchdogActivityClass.artifact.rawValue)
     }
 
     public static func isStillish(_ logits: [[Double]]) -> Bool {
@@ -136,8 +157,14 @@ public enum WatchdogActivityRuntime: Sendable {
 
     private static func pick(occ: Double, dynMean: Double, dynCV: Double, gravVar: Double,
                              walkF: Double, runF: Double, stillF: Double, hasTicks: Bool,
-                             hasImu: Bool, hr: Double?) -> WatchdogActivityClass {
+                             hasImu: Bool, hr: Double?,
+                             windowDynCV: Double = 0, setRest: Bool = false,
+                             sparseSteps: Bool = false) -> WatchdogActivityClass {
         if !hasTicks && !hasImu { return .unknown }
+        let stepSport = hasTicks && !sparseSteps && (walkF >= 0.45 || runF >= 0.45)
+        if !stepSport && occ > 0.35 && (dynCV > 1.4 || windowDynCV > 0.85) && !hasTicks {
+            return .artifact
+        }
         if occ > 0.35 && dynCV > 1.4 { return .artifact }
         if occ > 0.45, let hr, abs(hr - 60) < 6, dynMean > 0.15 { return .artifact }
         if hasTicks && runF >= 0.45 { return .run }
@@ -145,9 +172,14 @@ public enum WatchdogActivityRuntime: Sendable {
         if hasTicks && stillF >= 0.55 && occ < 0.22 { return occ < 0.08 ? .still : .stand }
         if occ < 0.07 && dynMean < 0.03 { return .still }
         if occ < 0.14 && gravVar < 0.08 { return .stand }
+        if setRest && occ >= 0.18 && occ < 0.55 && walkF < 0.35 && runF < 0.35 {
+            return .resistance
+        }
         if occ >= 0.55 { return .run }
-        if occ >= 0.22 && occ < 0.55 && dynCV < 0.35 { return .cycleLike }
-        if occ >= 0.18 && dynCV > 0.85 { return .resistance }
+        if occ >= 0.22 && occ < 0.55 && dynCV < 0.35 && windowDynCV < 0.55 && !setRest {
+            return .cycleLike
+        }
+        if occ >= 0.18 && (dynCV > 0.85 || setRest) { return .resistance }
         if occ >= 0.18 { return .walk }
         return .unknown
     }
@@ -161,11 +193,20 @@ public enum WatchdogActivityRuntime: Sendable {
     /// Last 10 minutes: in-tree coarse workout classifier biases the embedding (same job as Auto Workout).
     private static func blendWorkout(logits: inout [[Double]], motion: [Double?], hr: [Double?],
                                      steps: [StepSample], imu: [WatchdogIMUSample],
-                                     startUnix: Int, nowUnix: Int) {
+                                     startUnix: Int, nowUnix: Int,
+                                     family: DeviceFamily = .whoop4,
+                                     windowDynCV: Double = 0, setRest: Bool = false) {
         let n = logits.count
         let tail = min(10, n)
         guard tail >= 4 else { return }
         let slice = (n - tail)..<n
+        let artifactIdx = WatchdogActivityClass.artifact.index
+        let tailArtifact = slice.filter { i in
+            guard i < logits.count, artifactIdx < logits[i].count else { return false }
+            return logits[i][artifactIdx] >= 0.5
+        }.count
+        if tailArtifact * 2 >= tail { return }
+        if windowDynCV > 0.85 && !setRest { return }
         let occs = slice.compactMap { motion[$0] }
         let hrs = slice.compactMap { hr[$0] }
         guard occs.count >= 3, let meanHR = average(hrs) else { return }
@@ -184,7 +225,8 @@ public enum WatchdogActivityRuntime: Sendable {
             default: break
             }
         }
-        let dens = ticks / Double(tail * WatchdogConfig.gridSeconds)
+        let samplesPerMin = family == .whoop5 ? 2.0 : 60.0
+        let dens = ticks / max(1, Double(tail) * samplesPerMin)
         let cover = min(1, dens * 8)
         let dyns = imu.filter { $0.ts >= from && $0.ts < nowUnix }.compactMap(\.dynAccel)
         let mVar = variance(dyns.isEmpty ? occs : dyns)
@@ -204,16 +246,36 @@ public enum WatchdogActivityRuntime: Sendable {
         case .walk: cls = .walk
         case .run: cls = .run
         case .strength: cls = .resistance
-        case .cycle, .ski: cls = .cycleLike
+        case .cycle, .ski:
+            if setRest || (windowDynCV > 0.70 && walk + run < ticks * 0.25) { return }
+            cls = .cycleLike
         case .other: return
         }
         let w = min(0.65, pred.confidence)
         for i in slice {
+            if i < logits.count, logits[i][artifactIdx] >= 0.5 { continue }
             var row = logits[i]
             for j in 0..<row.count { row[j] *= (1 - w) }
             row[cls.index] += w
             logits[i] = row
         }
+    }
+
+    /// Alternating high/low dynAccel across minutes (sets vs rest) — lift, not smooth cycle.
+    private static func isSetRestCadence(_ dynMeans: [Double]) -> Bool {
+        let xs = dynMeans.suffix(10)
+        guard xs.count >= 6 else { return false }
+        let hi = xs.filter { $0 >= 0.22 }.count
+        let lo = xs.filter { $0 <= 0.10 }.count
+        guard hi >= 2 && lo >= 2 else { return false }
+        var flips = 0
+        var prev: Bool?
+        for x in xs {
+            let high = x >= 0.22
+            if let prev, prev != high { flips += 1 }
+            prev = high
+        }
+        return flips >= 3
     }
 
     private static func average(_ xs: [Double]) -> Double? {

@@ -39,6 +39,9 @@ final class WatchdogV24DynamicTests: XCTestCase {
         XCTAssertEqual(WatchdogEventGeometry.what(cls: .walk, reconJ: 0.1, forecastJ: 0,
                                                  safety: true, artifact: false, postWorkout: false,
                                                  sleep: false, hrHot: true, breadth: 0), .safetyBound)
+        XCTAssertEqual(WatchdogEventGeometry.what(cls: .walk, reconJ: 1.5, forecastJ: 0,
+                                                 safety: true, artifact: false, postWorkout: false,
+                                                 sleep: false, hrHot: true, breadth: 0.2), .safetyBound)
         XCTAssertEqual(WatchdogEventGeometry.what(cls: .still, reconJ: 0.1, forecastJ: 0,
                                                  safety: false, artifact: true, postWorkout: false,
                                                  sleep: false, hrHot: false, breadth: 0), .artifactSpike)
@@ -56,14 +59,21 @@ final class WatchdogV24DynamicTests: XCTestCase {
     }
 
     func testClassHoldCutAfterTwoMinutesNewFamily() {
-        let d = WatchdogEventGeometry.resolve(cls: .walk, familyStableTicks: 2, previousFamily: "still",
-                                              reconJ: 0.2, forecastJ: 0.1, previousReconJ: 0.2,
-                                              previousForecastJ: 0.1, reconAboveTicks: 0, forecastAboveTicks: 0,
-                                              safety: false, artifact: false, postWorkout: false, sleep: false,
-                                              hrHot: false, breadth: 0.1, eventAgeSeconds: 120)
-        XCTAssertTrue(d.cut)
-        XCTAssertEqual(d.cutReason, "class-hold")
-        XCTAssertEqual(d.label, .workoutWalk)
+        let early = WatchdogEventGeometry.resolve(cls: .walk, familyStableTicks: 2, previousFamily: "still",
+                                                  reconJ: 0.2, forecastJ: 0.1, previousReconJ: 0.2,
+                                                  previousForecastJ: 0.1, reconAboveTicks: 0, forecastAboveTicks: 0,
+                                                  safety: false, artifact: false, postWorkout: false, sleep: false,
+                                                  hrHot: false, breadth: 0.1, eventAgeSeconds: 40)
+        XCTAssertFalse(early.cut)
+        XCTAssertEqual(early.label, .mixedRejected)
+        let held = WatchdogEventGeometry.resolve(cls: .walk, familyStableTicks: 6, previousFamily: "still",
+                                                 reconJ: 0.2, forecastJ: 0.1, previousReconJ: 0.2,
+                                                 previousForecastJ: 0.1, reconAboveTicks: 0, forecastAboveTicks: 0,
+                                                 safety: false, artifact: false, postWorkout: false, sleep: false,
+                                                 hrHot: false, breadth: 0.1, eventAgeSeconds: 120)
+        XCTAssertTrue(held.cut)
+        XCTAssertEqual(held.cutReason, "class-hold")
+        XCTAssertEqual(held.label, .workoutWalk)
     }
 
     func testOneMinuteFamilyBlipDoesNotCut() {

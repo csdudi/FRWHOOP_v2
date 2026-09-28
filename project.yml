@@ -87,6 +87,7 @@ targets:
         excludes:
           - "Resources/Info.plist"
           - "Resources/Strand.entitlements"
+          - "**/* 2.swift"
           # The liquid Today is now cross-platform: its iOS-only chrome (topBarTrailing / navigationBarTitleDisplayMode
           # / presentationCompactAdaptation / two-param onChange / sensoryFeedback) is guarded, so the mac split-view
           # shell hosts LiquidTodayView too. All Liquid/* now compile into the mac target.
@@ -221,6 +222,7 @@ targets:
           # macOS-only AppIntents (BuzzStrap/MarkMoment) — iOS uses StrandiOS/System/NOOPAppIntents.swift.
           # Without this exclude both compile into the iOS target and collide on NOOPAppIntents.stringsdata.
           - "System/NOOPAppIntents.swift"
+          - "**/* 2.swift"
       - path: StrandiOS
         excludes:
           - "Resources/Info.plist"

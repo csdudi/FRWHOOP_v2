@@ -186,18 +186,18 @@ final class BaselineStoreTests: XCTestCase {
         store.series = .continuousHR
         store.rescore(days: days)
         XCTAssertEqual(store.evaluation?.series, .continuousHR)
-        XCTAssertEqual(store.evaluation?.todayNative ?? -1, 75, accuracy: 0.01)
-        XCTAssertGreaterThan(store.weekPoints.compactMap(\.value).count, 4)
+        XCTAssertNil(store.evaluation?.todayNative)
+        XCTAssertTrue(store.weekPoints.compactMap(\.value).isEmpty)
 
         store.context = .rest
         store.series = .awakeRestHR
         store.rescore(days: days)
-        XCTAssertEqual(store.evaluation?.todayNative ?? -1, 67, accuracy: 0.01)
+        XCTAssertNil(store.evaluation?.todayNative)
 
         store.context = .active
         store.series = .awakeActiveHR
         store.rescore(days: days)
-        XCTAssertEqual(store.evaluation?.todayNative ?? -1, 93, accuracy: 0.01)
+        XCTAssertNil(store.evaluation?.todayNative)
 
         store.context = .sleep
         let expected: [(LBSeries, Double)] = [
@@ -222,7 +222,7 @@ final class BaselineStoreTests: XCTestCase {
         XCTAssertEqual(store.evaluation?.series, .continuousHRVLn)
         store.selectSeries(.continuousSpO2Mean, days: days)
         XCTAssertEqual(store.evaluation?.series, .continuousSpO2Mean)
-        XCTAssertEqual(store.evaluation?.todayNative ?? -1, 96.7, accuracy: 0.05)
+        XCTAssertNil(store.evaluation?.todayNative)
 
         store.selectContext(.rest, days: days)
         XCTAssertEqual(store.series, .awakeRestHR)
@@ -237,7 +237,7 @@ final class BaselineStoreTests: XCTestCase {
         XCTAssertEqual(store.evaluation?.series, .awakeActiveHRVLn)
         store.selectSeries(.awakeActiveSpO2Mean, days: days)
         XCTAssertEqual(store.evaluation?.series, .awakeActiveSpO2Mean)
-        XCTAssertEqual(store.evaluation?.todayNative ?? -1, 96.3, accuracy: 0.05)
+        XCTAssertNil(store.evaluation?.todayNative)
     }
 
     @MainActor
@@ -343,12 +343,12 @@ final class BaselineStoreTests: XCTestCase {
         let asOf = days.last!.day
         let store = BaselineStore(defaults: UserDefaults(suiteName: suite)!, asOf: asOf)
         store.selectContext(.allDay, days: days)
-        XCTAssertNotNil(store.longCopyForPlot(), "All day should draw a 60-day range")
-        XCTAssertGreaterThan(store.longPoints.compactMap(\.value).count, 20)
+        XCTAssertNil(store.longCopyForPlot(), "All day has no DailyMetric column yet")
+        XCTAssertTrue(store.longPoints.compactMap(\.value).isEmpty)
         store.selectContext(.active, days: days)
-        XCTAssertNotNil(store.longCopyForPlot(), "Active should draw a 60-day range")
+        XCTAssertNil(store.longCopyForPlot(), "Active has no DailyMetric column yet")
         store.selectContext(.rest, days: days)
-        XCTAssertNotNil(store.longCopyForPlot())
+        XCTAssertNil(store.longCopyForPlot())
     }
 
     @MainActor
@@ -361,9 +361,9 @@ final class BaselineStoreTests: XCTestCase {
                        clockTime: "07:00", enteredBy: .caregiver, days: days)
         XCTAssertNotNil(store.longCopyForPlot())
         store.selectContext(.allDay, days: days)
-        XCTAssertNotNil(store.longCopyForPlot())
+        XCTAssertNil(store.longCopyForPlot())
         store.selectContext(.active, days: days)
-        XCTAssertNotNil(store.longCopyForPlot())
+        XCTAssertNil(store.longCopyForPlot())
     }
 
     @MainActor

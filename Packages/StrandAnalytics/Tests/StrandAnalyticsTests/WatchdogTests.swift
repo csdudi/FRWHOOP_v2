@@ -133,8 +133,9 @@ final class WatchdogWindowTests: XCTestCase {
         switch WatchdogWindowBuilder.build(feed) {
         case .failure(let r): XCTFail("\(r)")
         case .success(let w):
-            XCTAssertEqual(w.resp.compactMap { $0 }.count, 30)
-            XCTAssertTrue(w.resp.compactMap { $0 }.allSatisfy { abs($0 - 14) < 0.01 })
+            XCTAssertEqual(w.resp.compactMap { $0 }.count, 5)
+            XCTAssertTrue(w.resp.dropFirst(5).allSatisfy { $0 == nil })
+            XCTAssertTrue(w.resp.prefix(5).compactMap { $0 }.allSatisfy { abs($0 - 14) < 0.01 })
         }
     }
 
@@ -147,14 +148,20 @@ final class WatchdogWindowTests: XCTestCase {
         XCTAssertEqual(held[4], 16)
     }
 
-    func testMotionGapsAreInterpolatedNotZeroed() {
-        let series: [Double?] = [0.0, nil, nil, 0.9, nil]
-        let filled = WatchdogWindowBuilder.interpolateGaps(series)
-        XCTAssertEqual(filled[0] ?? -1, 0, accuracy: 0.001)
-        XCTAssertGreaterThan(filled[1] ?? 0, 0.2)
-        XCTAssertLessThan(filled[1] ?? 1, 0.7)
-        XCTAssertEqual(filled[3] ?? 0, 0.9, accuracy: 0.001)
-        XCTAssertEqual(filled[4] ?? 0, 0.9, accuracy: 0.001)
+    func testMotionGapsStayMissingOnScoredWindow() {
+        let now = 3_400_000
+        let start = now - 1800
+        let hr = (start..<now).map { HRSample(ts: $0, bpm: 60) }
+        let motion = (start..<(start + 60)).map { WatchdogScalarSample(ts: $0, value: 0.1) }
+            + ((now - 60)..<now).map { WatchdogScalarSample(ts: $0, value: 0.9) }
+        let feed = WatchdogFeed(family: .whoop4, hrSource: .v18, nowUnix: now, hr: hr, motion: motion)
+        switch WatchdogWindowBuilder.build(feed) {
+        case .failure(let r): XCTFail("\(r)")
+        case .success(let w):
+            XCTAssertNotNil(w.motion.first ?? nil)
+            XCTAssertNotNil(w.motion.last ?? nil)
+            XCTAssertTrue(w.motion.dropFirst().dropLast().contains { $0 == nil })
+        }
     }
 
     func testRmssdGridDropsEctopicJumps() {
@@ -464,6 +471,21 @@ final class WatchdogEpisodeTests: XCTestCase {
         XCTAssertFalse(r.shouldNotify)
     }
 
+    func testLearningInjectStaysOnPopulationPrompt() {
+        let r = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
+                                  nowUnix: 10, inject: .learning)
+        XCTAssertEqual(r.promptSource, .population)
+        XCTAssertLessThan(r.trustPct, LongitudinalBaseline.trustHideThreshold)
+        XCTAssertFalse(r.shouldNotify)
+    }
+
+    func testWristOffInjectIsUnavailable() {
+        let r = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
+                                  nowUnix: 10, inject: .wristOff)
+        XCTAssertEqual(r.unavailable, .wristOff)
+        XCTAssertEqual(r.episodeState, .dataUnavailable)
+    }
+
     func testSevereInjectNotifiesOnSecondTickOnlyOncePerCooldown() {
         let t = 8_000_000
         let first = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
@@ -655,6 +677,8 @@ final class WatchdogEpisodeTests: XCTestCase {
     }
 
     func testQuietTicksAdaptSigmaFloor() throws {
+        WatchdogForecastRuntime.testPredict = .some(nil)
+        defer { WatchdogForecastRuntime.testPredict = nil }
         let now = 32_000_000
         let feed = Watchdog.syntheticFeed(now: now, hr: 58, hrv: 48, temp: 33.1, resp: 14, motion: 0)
         let win = WatchdogWindowBuilder.build(feed)
@@ -662,12 +686,13 @@ final class WatchdogEpisodeTests: XCTestCase {
         var last = Watchdog.evaluate(window: win, prompt: UniTSPrompt(hr: 58, rhr: 58, hrv: 48, temp: 33.1, resp: 14, spo2: 97),
                                      nowUnix: now, previous: carry)
         XCTAssertFalse(last.sigmaAdaptive)
-        for i in 1...10 {
+        for i in 1...16 {
             last = Watchdog.evaluate(window: win, prompt: UniTSPrompt(hr: 58, rhr: 58, hrv: 48, temp: 33.1, resp: 14, spo2: 97),
-                                     nowUnix: now + i * 20, previous: last.carry)
+                                     nowUnix: now + i * 60, previous: last.carry)
         }
         XCTAssertGreaterThanOrEqual(last.carry.quietN, 8)
         XCTAssertTrue(last.sigmaAdaptive)
+        XCTAssertTrue(last.carry.bandReady)
         XCTAssertEqual(last.qualityGate, "bucket-v1")
     }
 }

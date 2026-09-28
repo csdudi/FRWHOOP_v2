@@ -36,94 +36,79 @@ struct WatchdogPlaceholderView: View {
                 Text("Live baseline")
                     .font(StrandFont.title2)
                     .foregroundStyle(StrandPalette.textPrimary)
-                liveBanner
-                if snapshot.trustPct != nil || snapshot.trustCaption != nil {
-                    trustLine
-                }
-                Text("The green band is this stretch’s reconstructed usual. Heart rate uses the awake pulse usual; resting HR uses still minutes and the sleep usual. Not a diagnosis.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                Text(snapshot.headline)
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
+                liveBanner
+                if let caption = snapshot.certaintyCaption {
+                    Text(caption)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 traitRows
             }
             .padding(.vertical, 4)
         }
         .onAppear { WatchdogNotifier.requestAuthorization() }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(snapshot.liveLabel). Live baseline")
+        .accessibilityLabel(snapshot.trustPct.map { "\(snapshot.headline). \(snapshot.liveLabel). TRUST \($0) percent. Live baseline" }
+            ?? "\(snapshot.headline). \(snapshot.liveLabel). Live baseline")
     }
 
     private var liveBanner: some View {
         TimelineView(.periodic(from: .now, by: 0.9)) { timeline in
             let pulse = snapshot.isLive
                 && Int(timeline.date.timeIntervalSince1970 / 0.9) % 2 == 0
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(snapshot.isLive ? StrandPalette.statusPositive : StrandPalette.textTertiary)
-                    .frame(width: 8, height: 8)
-                    .opacity(snapshot.isLive ? (pulse ? 1 : 0.28) : 0.5)
-                    .accessibilityHidden(true)
-                Text(snapshot.isLive ? "On" : snapshot.liveLabel)
-                    .font(StrandFont.caption.weight(.semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(snapshot.isLive ? StrandPalette.statusPositive : StrandPalette.textSecondary)
-                if snapshot.isLive, snapshot.earlyFlag {
-                    Text("·")
-                        .foregroundStyle(StrandPalette.textTertiary)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(snapshot.isLive ? StrandPalette.statusPositive : StrandPalette.textTertiary)
+                        .frame(width: 8, height: 8)
+                        .opacity(snapshot.isLive ? (pulse ? 1 : 0.28) : 0.5)
                         .accessibilityHidden(true)
-                    Text("Early")
+                    Text(snapshot.isLive ? "On" : snapshot.liveLabel)
                         .font(StrandFont.caption.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
-                if snapshot.isLive, snapshot.activityDetail != "Context unknown" {
-                    Text("·")
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .accessibilityHidden(true)
-                    Text(snapshot.activityDetail)
+                        .tracking(0.6)
+                        .foregroundStyle(snapshot.isLive ? StrandPalette.statusPositive : StrandPalette.textSecondary)
+                    if snapshot.isLive, !snapshot.activityPhrase.isEmpty {
+                        Text(snapshot.activityPhrase)
+                            .font(StrandFont.caption)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Text(snapshot.isLive ? (snapshot.updatedAgo ?? "Updating") : "Waiting")
                         .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textSecondary)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .lineLimit(1)
                 }
-                Text("·")
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .accessibilityHidden(true)
-                Text(snapshot.isLive ? (snapshot.updatedAgo ?? "Updating") : "Waiting on a reading")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                Spacer(minLength: 0)
+                HStack(spacing: 8) {
+                    if snapshot.isLive, snapshot.earlyFlag {
+                        Text("Ahead")
+                            .font(StrandFont.caption.weight(.semibold))
+                            .foregroundStyle(StrandPalette.textSecondary)
+                    }
+                    Spacer(minLength: 0)
+                    if let trust = snapshot.trustPct {
+                        Text("TRUST \(trust)%")
+                            .font(StrandFont.caption.weight(.semibold))
+                            .tracking(0.5)
+                            .foregroundStyle(WatchdogLiveSnapshot.trustColor(trust))
+                            .monospacedDigit()
+                    }
+                }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .background(
-                Capsule(style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(snapshot.isLive
                           ? StrandPalette.statusPositive.opacity(0.12)
                           : StrandPalette.surfaceInset)
             )
         }
-    }
-
-    private var trustLine: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if let pct = snapshot.trustPct {
-                Text("TRUST \(pct)%")
-                    .font(StrandFont.caption.weight(.semibold))
-                    .foregroundStyle(trustColor(pct))
-                    .tracking(0.4)
-                    .accessibilityLabel("Trust \(pct) percent")
-            }
-            if let caption = snapshot.trustCaption {
-                Text(caption)
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private func trustColor(_ pct: Int) -> Color {
-        if pct >= 70 { return StrandPalette.statusPositive }
-        if pct >= 40 { return StrandPalette.textSecondary }
-        return StrandPalette.statusWarning
     }
 
     private var traitRows: some View {
@@ -132,25 +117,20 @@ struct WatchdogPlaceholderView: View {
                 if index > 0 {
                     Divider().overlay(StrandPalette.hairline)
                 }
-                HStack(alignment: .center, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(row.name)
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textPrimary)
                             .lineLimit(1)
+                        Spacer(minLength: 8)
                         Text(row.now)
-                            .font(StrandFont.rounded(18, weight: .bold))
+                            .font(StrandFont.rounded(22, weight: .bold))
                             .foregroundStyle(row.tone)
                             .monospacedDigit()
                             .lineLimit(1)
                             .minimumScaleFactor(0.7)
-                        Text(row.windowCaption)
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
                     }
-                    .frame(width: 88, alignment: .leading)
                     WatchdogTraitStrip(values: row.series,
                                        reconstructed: row.reconstructed,
                                        usual: row.usualValue,
@@ -161,24 +141,26 @@ struct WatchdogPlaceholderView: View {
                                        rangeSeries: row.rangeSeries,
                                        pulsePeriod: snapshot.isLive ? row.pulsePeriod : 0)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 72)
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(row.expected)
-                            .font(StrandFont.rounded(16, weight: .semibold))
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .monospacedDigit()
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.65)
+                        .frame(height: 64)
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(row.status)
                             .font(StrandFont.subhead.weight(.semibold))
                             .foregroundStyle(row.tone)
-                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text("Predicted")
+                                .font(StrandFont.caption)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                            Text(row.expected)
+                                .font(StrandFont.rounded(16, weight: .semibold))
+                                .foregroundStyle(StrandPalette.textSecondary)
+                                .monospacedDigit()
+                        }
                     }
-                    .frame(width: 84, alignment: .trailing)
                 }
                 .padding(.vertical, 12)
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(row.name) \(row.now), expected \(row.expected), \(row.status)")
+                .accessibilityLabel("\(row.name) \(row.windowCaption). \(row.now), predicted \(row.expected), \(row.status)")
             }
         }
     }
@@ -253,44 +235,8 @@ private struct WatchdogTraitStrip: View {
         return (mid - span / 2 - pad)...(mid + span / 2 + pad)
     }
 
-    private func formatY(_ value: Double) -> String {
-        decimals == 0 ? String(format: "%.0f", value) : String(format: "%.\(decimals)f", value)
-    }
-
-    private func yPixel(value: Double, height: CGFloat) -> CGFloat {
-        let d = yDomain
-        let span = d.upperBound - d.lowerBound
-        guard span > 0 else { return height / 2 }
-        let t = (value - d.lowerBound) / span
-        return (1 - t) * height
-    }
-
     var body: some View {
-        HStack(alignment: .center, spacing: 3) {
-            if let liveRange {
-                GeometryReader { geo in
-                    Text(formatY(liveRange.hi))
-                        .font(.system(size: 9, weight: .regular, design: .rounded))
-                        .foregroundStyle(StrandPalette.statusPositive)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                        .frame(width: geo.size.width, alignment: .trailing)
-                        .position(x: geo.size.width / 2, y: yPixel(value: liveRange.hi, height: geo.size.height))
-                    Text(formatY(liveRange.lo))
-                        .font(.system(size: 9, weight: .regular, design: .rounded))
-                        .foregroundStyle(StrandPalette.statusPositive)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                        .frame(width: geo.size.width, alignment: .trailing)
-                        .position(x: geo.size.width / 2, y: yPixel(value: liveRange.lo, height: geo.size.height))
-                }
-                .frame(width: 24)
-                .accessibilityHidden(true)
-            }
-            plot
-        }
+        plot
     }
 
     @ViewBuilder
@@ -378,11 +324,10 @@ private struct WatchdogLiveSnapshot {
     let isLive: Bool
     let liveLabel: String
     let updatedAgo: String?
-    let trustPct: Int?
-    let trustCaption: String?
-    let activityDetail: String
+    let certaintyCaption: String?
+    let activityPhrase: String
     let earlyFlag: Bool
-    let sigmaAdaptive: Bool
+    let trustPct: Int?
     let metrics: [MetricRow]
 
     init(store: BaselineStore, temperatureUnit: TemperatureUnit = .celsius) {
@@ -392,11 +337,11 @@ private struct WatchdogLiveSnapshot {
             isLive = result.monitoringCurrent && result.unavailable == nil
             liveLabel = isLive ? "Live baseline" : Self.waitingLabel(result)
             updatedAgo = Self.ago(result.lastTickUnix)
-            trustPct = result.unavailable == nil ? result.trustPct : nil
-            trustCaption = Self.trustCaption(result)
-            activityDetail = result.activityDetail
-            earlyFlag = result.earlyFlag && result.trustPct >= 35
-            sigmaAdaptive = result.sigmaAdaptive
+            certaintyCaption = Self.certaintyCaption(result)
+            let token = WatchdogEventLabel(rawValue: result.eventLabel) ?? .gap
+            activityPhrase = WatchdogEventLabeler.wearerPhrase(token, lastCommitted: result.carry.lastEventLabel)
+            earlyFlag = result.earlyFlag && result.trustPct >= 35 && result.unavailable == nil
+            trustPct = result.trustPct
             let hr = result.signals.first(where: { $0.name == "HR" })
             let rhr = result.signals.first(where: { $0.name == "RHR" })
             let hrv = result.signals.first(where: { $0.name == "HRV" })
@@ -404,26 +349,27 @@ private struct WatchdogLiveSnapshot {
             let resp = result.signals.first(where: { $0.name == "Resp" })
             let spo2 = result.signals.first(where: { $0.name == "SpO2" })
             let whoop5 = WhoopModel.persisted == .whoop5mg
+            let trust = result.trustPct
             metrics = [
                 Self.row(id: "hr", name: "Heart rate", signal: hr, series: result.horizonHR,
                          reconstructed: result.reconstructedHR, rangeSeries: result.rangeHR,
-                         caption: "Pulse · awake usual", minSpan: 8, whoop5: whoop5),
+                         caption: "Pulse", minSpan: 8, whoop5: whoop5, trustPct: trust),
                 Self.row(id: "rhr", name: "Resting HR", signal: rhr, series: result.horizonRHR,
                          reconstructed: result.reconstructedRHR, rangeSeries: result.rangeRHR,
-                         caption: "Still minutes · sleep usual", minSpan: 8, whoop5: whoop5),
+                         caption: "Still", minSpan: 8, whoop5: whoop5, trustPct: trust),
                 Self.row(id: "hrv", name: "HRV", signal: hrv, series: result.horizonHRV,
                          reconstructed: result.reconstructedHRV, rangeSeries: result.rangeHRV,
-                         caption: "Last 5 min RMSSD", minSpan: 18, whoop5: whoop5),
-                Self.row(id: "temp", name: "Wrist temp", signal: temp, series: result.horizonTemp,
+                         caption: "5 min", minSpan: 18, whoop5: whoop5, trustPct: trust),
+                Self.row(id: "temp", name: "Temp", signal: temp, series: result.horizonTemp,
                          reconstructed: result.reconstructedTemp, rangeSeries: result.rangeTemp,
-                         caption: "Last 30 min", minSpan: 0.4, whoop5: whoop5,
-                         fahrenheit: fahrenheit),
+                         caption: "30 min", minSpan: 0.4, whoop5: whoop5,
+                         fahrenheit: fahrenheit, trustPct: trust),
                 Self.row(id: "resp", name: "Breathing", signal: resp, series: result.horizonResp,
                          reconstructed: result.reconstructedResp, rangeSeries: result.rangeResp,
-                         caption: "Held across gaps", minSpan: 4, whoop5: whoop5),
+                         caption: "Minutes", minSpan: 4, whoop5: whoop5, trustPct: trust),
                 Self.row(id: "spo2", name: "SpO₂", signal: spo2, series: result.horizonSpO2,
                          reconstructed: result.reconstructedSpO2, rangeSeries: result.rangeSpO2,
-                         caption: "Percent samples", minSpan: 2, whoop5: whoop5)
+                         caption: "When present", minSpan: 2, whoop5: whoop5, trustPct: trust)
             ]
             return
         }
@@ -431,28 +377,27 @@ private struct WatchdogLiveSnapshot {
         isLive = false
         liveLabel = "Waiting"
         updatedAgo = nil
-        trustPct = nil
-        trustCaption = "Usual is still being learned."
-        headline = "Waiting on this half-hour"
-        activityDetail = "Context unknown"
+        certaintyCaption = "Waiting on this half-hour."
+        headline = "Waiting"
+        activityPhrase = ""
         earlyFlag = false
-        sigmaAdaptive = false
+        trustPct = nil
         let whoop5 = WhoopModel.persisted == .whoop5mg
         metrics = [
-            Self.emptyRow(id: "hr", name: "Heart rate", caption: "Pulse · awake usual", minSpan: 8, whoop5: whoop5),
-            Self.emptyRow(id: "rhr", name: "Resting HR", caption: "Still minutes · sleep usual", minSpan: 8, whoop5: whoop5),
-            Self.emptyRow(id: "hrv", name: "HRV", caption: "Last 5 min RMSSD", minSpan: 18, whoop5: whoop5),
-            Self.emptyRow(id: "temp", name: "Wrist temp", caption: "Last 30 min", minSpan: 0.4, whoop5: whoop5,
+            Self.emptyRow(id: "hr", name: "Heart rate", caption: "Pulse", minSpan: 8, whoop5: whoop5),
+            Self.emptyRow(id: "rhr", name: "Resting HR", caption: "Still", minSpan: 8, whoop5: whoop5),
+            Self.emptyRow(id: "hrv", name: "HRV", caption: "5 min", minSpan: 18, whoop5: whoop5),
+            Self.emptyRow(id: "temp", name: "Temp", caption: "30 min", minSpan: 0.4, whoop5: whoop5,
                           fahrenheit: fahrenheit),
-            Self.emptyRow(id: "resp", name: "Breathing", caption: "Held across gaps", minSpan: 4, whoop5: whoop5),
-            Self.emptyRow(id: "spo2", name: "SpO₂", caption: "Percent samples", minSpan: 2, whoop5: whoop5)
+            Self.emptyRow(id: "resp", name: "Breathing", caption: "Minutes", minSpan: 4, whoop5: whoop5),
+            Self.emptyRow(id: "spo2", name: "SpO₂", caption: "When present", minSpan: 2, whoop5: whoop5)
         ]
     }
 
     static func row(id: String, name: String, signal: WatchdogSignalEvidence?,
                     series: [Double], reconstructed: [Double], rangeSeries: [Double],
-                    caption: String, minSpan: Double, whoop5: Bool, fahrenheit: Bool = false) -> MetricRow {
-        let energy = signal?.energy ?? 0
+                    caption: String, minSpan: Double, whoop5: Bool, fahrenheit: Bool = false,
+                    trustPct: Int) -> MetricRow {
         var now = signal?.observed
         var usual = signal?.reconstructed ?? signal?.usual
         var series = series
@@ -471,6 +416,19 @@ private struct WatchdogLiveSnapshot {
             rangeSeries = rangeSeries.map { $0 * 9.0 / 5.0 }
             unit = "°F"
         }
+        let hasLive = series.contains(where: \.isFinite)
+        let callReady = trustPct >= LongitudinalBaseline.trustHideThreshold
+        let bandGain = Self.learningBandGain(trustPct)
+        reconstructed = Self.maskToRecorded(reconstructed, recorded: series)
+        rangeSeries = Self.maskToRecorded(rangeSeries, recorded: series).map { $0.isFinite ? $0 * bandGain : $0 }
+        range *= bandGain
+        guard hasLive else {
+            return MetricRow(id: id, name: name, now: "—", expected: "—", status: "—",
+                             tone: StrandPalette.textTertiary, series: series, reconstructed: [],
+                             usualValue: nil, windowCaption: caption, minSpan: minSpan,
+                             decimals: decimals(for: id), rangeHalf: range, rangeSeries: [],
+                             pulsePeriod: whoopReadSeconds(id: id, whoop5: whoop5))
+        }
         let aligned = lastAligned(series: series, reconstructed: reconstructed, usual: usual)
         let lastObs = aligned?.obs
         let lastHat = aligned?.hat
@@ -481,36 +439,52 @@ private struct WatchdogLiveSnapshot {
             return range
         }()
         let outsideBand: Bool = {
-            guard let lastObs, let lastHat, lastWidth > 0 else { return energy >= WatchdogConfig.tau }
+            guard let lastObs, let lastHat, lastWidth > 0 else { return false }
             return abs(lastObs - lastHat) > lastWidth
         }()
         let status: String
         let tone: Color
-        if signal?.observed == nil {
+        if lastObs == nil {
             status = "—"
             tone = StrandPalette.textTertiary
-        } else if outsideBand || energy >= WatchdogConfig.tau {
+        } else if !callReady {
+            status = "Learning"
+            tone = StrandPalette.textSecondary
+        } else if outsideBand {
             let mag: Double
             if lastWidth > 0, let lastObs, let lastHat {
                 mag = min(1, abs(lastObs - lastHat) / max(lastWidth, 0.001) / WatchdogConfig.tauSevere)
             } else {
-                mag = min(1, energy / WatchdogConfig.tauSevere)
+                mag = 0.5
             }
-            status = "Out of sync"
+            status = "Off"
             tone = baselineOffColor(mag)
         } else {
-            status = "In sync"
+            status = "In range"
             tone = StrandPalette.statusPositive
         }
         return MetricRow(id: id, name: name,
-                         now: format(now, decimals: decimals(for: id), unit: unit),
-                         expected: format(usual, decimals: decimals(for: id), unit: unit),
+                         now: format(lastObs ?? now, decimals: decimals(for: id), unit: unit),
+                         expected: format(lastHat, decimals: decimals(for: id), unit: unit),
                          status: status, tone: tone, series: series, reconstructed: reconstructed,
-                         usualValue: usual, windowCaption: caption, minSpan: minSpan,
+                         usualValue: lastHat ?? usual, windowCaption: caption, minSpan: minSpan,
                          decimals: decimals(for: id),
                          rangeHalf: lastWidth,
                          rangeSeries: rangeSeries,
                          pulsePeriod: whoopReadSeconds(id: id, whoop5: whoop5))
+    }
+
+    static func learningBandGain(_ trust: Int) -> Double {
+        if trust >= LongitudinalBaseline.trustHideThreshold { return 1 }
+        let t = max(0, min(LongitudinalBaseline.trustHideThreshold, trust))
+        return 1 + Double(LongitudinalBaseline.trustHideThreshold - t) / 35.0 * 2.5
+    }
+
+    static func maskToRecorded(_ values: [Double], recorded: [Double]) -> [Double] {
+        values.enumerated().map { i, value in
+            guard i < recorded.count, recorded[i].isFinite, value.isFinite else { return .nan }
+            return value
+        }
     }
 
     static func lastAligned(series: [Double], reconstructed: [Double], usual: Double?) -> (obs: Double, hat: Double, index: Int)? {
@@ -566,34 +540,52 @@ private struct WatchdogLiveSnapshot {
 
     static func decimals(for id: String) -> Int { id == "temp" ? 1 : 0 }
 
-    static func trustCaption(_ result: WatchdogResult) -> String? {
-        if result.unavailable != nil { return nil }
-        if result.trustPct < 35 { return "Call is weak until more usuals land." }
-        if !result.contributing.isEmpty { return "Trust is for this off call, not a diagnosis." }
-        return "This stretch matches the reconstructed usual."
+    static func certaintyCaption(_ result: WatchdogResult) -> String? {
+        if result.unavailable == .wristOff {
+            return "Strap off. Not recovered."
+        }
+        if result.unavailable != nil {
+            return "Not enough minutes."
+        }
+        if result.trustPct < LongitudinalBaseline.trustHideThreshold {
+            return "TRUST under 35%. No off call yet."
+        }
+        if !result.contributing.isEmpty {
+            return "One reading looks off."
+        }
+        return "Matches the predicted range."
+    }
+
+    static func trustColor(_ pct: Int) -> Color {
+        if pct >= 70 { return StrandPalette.statusPositive }
+        if pct >= 40 { return StrandPalette.textSecondary }
+        return StrandPalette.statusWarning
     }
 
     static func headline(_ result: WatchdogResult) -> String {
+        if result.unavailable == nil && result.trustPct < LongitudinalBaseline.trustHideThreshold {
+            return "Still learning"
+        }
         if result.earlyFlag && result.severity != .severe && result.severity != .active {
-            return "Leaving the expected path"
+            return "Leaving the path"
         }
         if let reason = result.unavailable {
             switch reason {
             case .wristOff: return "Strap off"
-            case .stale: return "Reading went stale"
-            case .coverage, .gap, .empty: return "Waiting on a reading"
+            case .stale: return "Stale"
+            case .coverage, .gap, .empty: return "Waiting"
             }
         }
         switch result.episodeState {
-        case .recovering: return "Settling back"
-        case .resolved: return "Looks like you again"
-        case .dataUnavailable: return "Waiting on a reading"
+        case .recovering: return "Settling"
+        case .resolved: return "Back to usual"
+        case .dataUnavailable: return "Waiting"
         case .candidate:
-            return result.severity == .candidate ? "A pattern is forming" : "One odd reading"
+            return result.severity == .candidate ? "Pattern forming" : "Odd reading"
         case .active:
-            return result.severity == .severe ? "Far from your usual" : "Unlike your usual"
+            return result.severity == .severe ? "Far from usual" : "Unlike usual"
         case .withinLimits:
-            return result.severity == .note ? "One reading a bit off" : "Looks like you"
+            return result.severity == .note ? "A bit off" : "Looks like you"
         }
     }
 

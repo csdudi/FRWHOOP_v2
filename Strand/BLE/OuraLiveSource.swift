@@ -1695,6 +1695,7 @@ public final class OuraLiveSource: NSObject, ObservableObject {
                 }
                 if feedsLive {
                     live.heartRate = hr.bpm
+                    live.noteHeartRatePacket(bpm: hr.bpm)
                     live.connected = true
                     // A LIVE HR push (0x2F) exists only while the ring is measuring on a finger, so it is
                     // the sole safe "worn now" signal. A banked IBI (.ibi below) can be a history re-serve

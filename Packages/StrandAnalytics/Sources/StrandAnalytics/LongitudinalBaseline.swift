@@ -1539,11 +1539,15 @@ public enum LongitudinalBaseline {
                 return LBDailyObservation(day: day, value: nil, qualityStatus: .missing,
                                           qualityReason: .unknown, streamPresent: false)
             }
-            if let native, native > spec.maxVal {
+            guard let native else {
+                return LBDailyObservation(day: day, value: nil, qualityStatus: .missing,
+                                          qualityReason: .unknown, streamPresent: true)
+            }
+            if native > spec.maxVal {
                 return LBDailyObservation(day: day, value: native, qualityStatus: .lowQuality,
                                           qualityReason: .outOfRange, streamPresent: true)
             }
-            return LBDailyObservation(day: day, value: native ?? 0, qualityStatus: .ok,
+            return LBDailyObservation(day: day, value: native, qualityStatus: .ok,
                                       streamPresent: true)
         }
         guard let native else {
@@ -1579,22 +1583,54 @@ public enum LongitudinalBaseline {
         var o = obs
         switch series {
         case .awakeRestHR, .awakeRestHRVLn:
-            if o.qualityStatus == .ok, let c = o.coverage, c < Params.awakeRestMinStill {
-                o.qualityStatus = .lowQuality
-                o.qualityReason = .lowCoverage
+            if o.qualityStatus == .ok {
+                guard let c = o.coverage else {
+                    o.qualityStatus = .lowQuality
+                    o.qualityReason = .lowCoverage
+                    break
+                }
+                if c < Params.awakeRestMinStill {
+                    o.qualityStatus = .lowQuality
+                    o.qualityReason = .lowCoverage
+                }
             }
         case .awakeActiveHR, .awakeActiveHRVLn:
-            if o.qualityStatus == .ok, let c = o.coverage, c < Params.awakeActiveMinMoving {
-                o.qualityStatus = .lowQuality
-                o.qualityReason = .lowCoverage
+            if o.qualityStatus == .ok {
+                guard let c = o.coverage else {
+                    o.qualityStatus = .lowQuality
+                    o.qualityReason = .lowCoverage
+                    break
+                }
+                if c < Params.awakeActiveMinMoving {
+                    o.qualityStatus = .lowQuality
+                    o.qualityReason = .lowCoverage
+                }
             }
         case .continuousHR, .continuousHRVLn:
-            if o.qualityStatus == .ok, let c = o.coverage, c < Params.continuousMinMinutes {
-                o.qualityStatus = .lowQuality
-                o.qualityReason = .lowCoverage
+            if o.qualityStatus == .ok {
+                guard let c = o.coverage else {
+                    o.qualityStatus = .lowQuality
+                    o.qualityReason = .lowCoverage
+                    break
+                }
+                if c < Params.continuousMinMinutes {
+                    o.qualityStatus = .lowQuality
+                    o.qualityReason = .lowCoverage
+                }
             }
-        case .sleepSpO2Mean, .sleepSpO2Nadir, .awakeRestSpO2Mean,
-             .awakeActiveSpO2Mean, .continuousSpO2Mean:
+        case .awakeRestSpO2Mean, .awakeActiveSpO2Mean, .continuousSpO2Mean:
+            guard let c = o.coverage else {
+                o.qualityStatus = .missing
+                o.qualityReason = .lowCoverage
+                o.value = nil
+                break
+            }
+            if c < Params.spo2MinSlots {
+                o.qualityStatus = .missing
+                o.qualityReason = .lowCoverage
+                o.value = nil
+            }
+        case .sleepSpO2Mean, .sleepSpO2Nadir:
             if let c = o.coverage, c < Params.spo2MinSlots {
                 o.qualityStatus = .missing
                 o.qualityReason = .lowCoverage
