@@ -40,6 +40,9 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
     case continuousSpO2Mean = "continuous_spo2_mean"
     case wakingSteps = "waking_steps"
     case wakingActiveMin = "waking_active_min"
+    /// Daily mean movement energy from strap IMU (1 Hz gravity / dynAccel, or 100 Hz features).
+    /// Never mixed with HR, RHR, or step count.
+    case wakingImuEnergy = "waking_imu_energy"
 
     /// LABEL: series context
     /// Five contexts. Still/moving is a minute gate, not a sixth series.
@@ -53,7 +56,7 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
             return .awakeActive
         case .continuousHR, .continuousHRVLn, .continuousSpO2Mean:
             return .continuous
-        case .wakingSteps, .wakingActiveMin:
+        case .wakingSteps, .wakingActiveMin, .wakingImuEnergy:
             return .wakingLoad
         }
     }
@@ -69,6 +72,7 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
         case .sleepSpO2Mean, .sleepSpO2Nadir, .awakeRestSpO2Mean, .awakeActiveSpO2Mean, .continuousSpO2Mean:
             return "spo2"
         case .wakingSteps, .wakingActiveMin: return "motion"
+        case .wakingImuEnergy: return "imu"
         }
     }
 
@@ -170,6 +174,10 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
             return LBPlanSeries(series: self, planName: "Daily active minutes",
                                 context: .wakingLoad, dailyMetricColumn: nil,
                                 condensedSection: "5.11", unit: "min")
+        case .wakingImuEnergy:
+            return LBPlanSeries(series: self, planName: "Daily movement energy",
+                                context: .wakingLoad, dailyMetricColumn: nil,
+                                condensedSection: "5.18", unit: "g")
         }
     }
 }
@@ -527,6 +535,8 @@ public enum LongitudinalBaseline {
         public static let awakeActiveMinMoving = 30.0
         /// Valid minutes (sleep or wake, still or moving) before a continuous HR/HRV day may train.
         public static let continuousMinMinutes = 240.0
+        /// Minutes of strap IMU before the movement-energy usual may train that day.
+        public static let imuMinMinutes = 60.0
         /// Stored on the snapshot; trial clocks are Phase B and do not change Phase A math.
         public static let persistWindow = 3
         public static let persistHits = 2
@@ -917,6 +927,7 @@ public enum LongitudinalBaseline {
             return (70, 100, 0.5)
         case .wakingSteps: return (0, 200_000, 500)
         case .wakingActiveMin: return (0, 1_440, 10)
+        case .wakingImuEnergy: return (0, 8, 0.02)
         }
     }
 
@@ -1531,7 +1542,7 @@ public enum LongitudinalBaseline {
 
     /// LABEL: apply range / coverage / sparse-sleep gates
     /// Writes quality_status + quality_reason. Out-of-range 200 bpm is not an observation that trains.
-    static func observation(day: String, native: Double?, streamPresent: Bool,
+    public static func observation(day: String, native: Double?, streamPresent: Bool,
                             sleepHrOnly: Bool, series: LBSeries) -> LBDailyObservation {
         let spec = seriesSpec(series)
         if series == .wakingSteps {
@@ -1579,7 +1590,7 @@ public enum LongitudinalBaseline {
     /// LABEL: coverage gate
     /// Awake-rest ≥30 still minutes; awake-active ≥30 moving minutes; continuous ≥240 minutes;
     /// SpO₂ ≥8 valid 30-minute slots in that context when coverage is present.
-    static func applyCoverageGate(_ obs: LBDailyObservation, series: LBSeries) -> LBDailyObservation {
+    public static func applyCoverageGate(_ obs: LBDailyObservation, series: LBSeries) -> LBDailyObservation {
         var o = obs
         switch series {
         case .awakeRestHR, .awakeRestHRVLn:
@@ -1635,6 +1646,18 @@ public enum LongitudinalBaseline {
                 o.qualityStatus = .missing
                 o.qualityReason = .lowCoverage
                 o.value = nil
+            }
+        case .wakingImuEnergy:
+            if o.qualityStatus == .ok {
+                guard let c = o.coverage else {
+                    o.qualityStatus = .lowQuality
+                    o.qualityReason = .lowCoverage
+                    break
+                }
+                if c < Params.imuMinMinutes {
+                    o.qualityStatus = .lowQuality
+                    o.qualityReason = .lowCoverage
+                }
             }
         default:
             break

@@ -116,6 +116,24 @@ final class WatchdogV33LogicGapTests: XCTestCase {
         XCTAssertEqual(Watchdog.layer1UsualTrust([ev], matching: [.awakeRestHR]), 40)
     }
 
+    func testHrTrustFollowsHatSeriesNotMaxAcrossCopies() {
+        var rest = LongitudinalBaseline.emptyEvaluation(asOf: "2026-09-20", series: .awakeRestHR, carry: LBCarry())
+        rest.showLong = true
+        rest.usualTrustPctLong = 40
+        rest.copyLong = LBCopySnapshot(center: 62, spread: 3, centerDisplay: 62,
+                                       bandLoDisplay: 56, bandHiDisplay: 68, n: 20,
+                                       coverage: 1, lastUpdate: "2026-09-19", version: "t", held: false)
+        var allDay = LongitudinalBaseline.emptyEvaluation(asOf: "2026-09-20", series: .continuousHR, carry: LBCarry())
+        allDay.showLong = true
+        allDay.usualTrustPctLong = 90
+        allDay.copyLong = LBCopySnapshot(center: 80, spread: 4, centerDisplay: 80,
+                                         bandLoDisplay: 72, bandHiDisplay: 88, n: 20,
+                                         coverage: 1, lastUpdate: "2026-09-19", version: "t", held: false)
+        XCTAssertEqual(UniTSPrompt.from(evaluations: [rest, allDay]).hr ?? 0, 62, accuracy: 0.01)
+        XCTAssertEqual(Watchdog.layer1UsualTrust([rest, allDay], matching: [.awakeRestHR, .continuousHR]), 40)
+        XCTAssertNotEqual(Watchdog.layer1UsualTrust([rest, allDay], matching: [.awakeRestHR, .continuousHR]), 90)
+    }
+
     // MARK: F17–F20 / F25
 
     func testReconstructEnergyIgnoresPreTailEffort() throws {
@@ -190,7 +208,7 @@ final class WatchdogV33LogicGapTests: XCTestCase {
         var carry = WatchdogCarry.empty
         let now = sleepUnix(day: 1)
         for i in 0..<16 {
-            carry = tick(now: now + i * 20, hr: 58, motion: 0, previous: carry).carry
+            carry = tick(now: now + i * 60, hr: 58, motion: 0, previous: carry).carry
         }
         let nativeN = carry.sessionNativeN
         XCTAssertGreaterThanOrEqual(nativeN, 12)

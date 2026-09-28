@@ -101,6 +101,7 @@ final class LongitudinalBaselineTrialTests: XCTestCase {
                 case .continuousHR, .continuousHRVLn: return 300
                 case .sleepSpO2Mean, .sleepSpO2Nadir, .awakeRestSpO2Mean,
                      .awakeActiveSpO2Mean, .continuousSpO2Mean: return 16
+                case .wakingImuEnergy: return 90
                 default: return nil
                 }
             }()

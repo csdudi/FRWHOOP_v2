@@ -1,5 +1,6 @@
 import Foundation
 import WhoopProtocol
+import WhoopStore
 
 public enum WatchdogHRSource: String, Equatable, Sendable, Codable {
     case v18
@@ -248,6 +249,45 @@ public enum WatchdogWindowBuilder {
         }
     }
 
+    /// Live percent from an optical row. Oura stores % in `red` with `ir == 0`. Some WHOOP
+    /// packets also write a 50…110 percent in `red` even when IR is present. Raw ADC pairs
+    /// (thousands) are not a percent and stay out of scoring — they are not `red/ir`.
+    public static func percentFromOptical(red: Int, ir: Int) -> Double? {
+        if AnalyticsEngine.spo2SingleChannelPlausible.contains(red) {
+            return min(Double(red), 100)
+        }
+        if ir <= 0 {
+            let v = Double(red)
+            return AnalyticsEngine.spo2SingleChannelPlausible.contains(Int(v.rounded())) ? min(v, 100) : nil
+        }
+        return nil
+    }
+
+    /// Vendor rate rows (Oura milli-bpm) or WHOOP waveform → breaths/min samples.
+    public static func respPerMin(rawRows: [(ts: Int, raw: Int)], ringRate: Bool,
+                                  start: Int, end: Int) -> [WatchdogScalarSample] {
+        if ringRate {
+            return rawRows.compactMap { row in
+                let bpm = OuraRespScale.breathsPerMin(raw: row.raw)
+                guard SleepStager.respPlausibleRangeBpm.contains(bpm) else { return nil }
+                return WatchdogScalarSample(ts: row.ts, value: bpm)
+            }
+        }
+        var out: [WatchdogScalarSample] = []
+        var b = start
+        let block = 5 * 60
+        while b < end {
+            let e = min(b + block, end)
+            let win = rawRows.filter { $0.ts >= b && $0.ts < e }.map { Double($0.raw) }
+            if let rate = SleepStager.respRateFromWaveform(win),
+               SleepStager.respPlausibleRangeBpm.contains(rate) {
+                out.append(WatchdogScalarSample(ts: max(b, e - 1), value: rate))
+            }
+            b += block
+        }
+        return out
+    }
+
     /// Last good reading fills a gap. Display helper only — `build` does not apply this to scored channels.
     public static func holdForward(_ series: [Double?], seed: Double? = nil) -> [Double?] {
         var last = seed
@@ -398,7 +438,7 @@ public enum WatchdogWindowBuilder {
             rr: rr.filter { $0.ts >= lookback && $0.ts < end },
             windowSec: 5 * 60,
             stepSec: WatchdogConfig.gridSeconds,
-            minBeatsPerWindow: HRVAnalyzer.minBeats
+            minBeatsPerWindow: 8
         )
         var out = Array(repeating: Optional<Double>.none, count: WatchdogConfig.seqLen)
         let span = max(end - start, 1)
@@ -408,7 +448,17 @@ public enum WatchdogWindowBuilder {
             let idx = min(WatchdogConfig.seqLen - 1, ((point.ts - start) * WatchdogConfig.seqLen) / span)
             out[idx] = point.rmssd
         }
-        return out
+        return median3(out)
+    }
+
+    /// One-minute RMSSD spikes from a thin R–R tail; 3-tap median keeps the 5-minute shape.
+    static func median3(_ xs: [Double?]) -> [Double?] {
+        guard xs.count >= 2 else { return xs }
+        return xs.indices.map { i in
+            let vals = [xs[max(0, i - 1)], xs[i], xs[min(xs.count - 1, i + 1)]].compactMap { $0 }
+            guard !vals.isEmpty else { return nil }
+            return vals.sorted()[vals.count / 2]
+        }
     }
 
     static func coverageFraction(hr: [Double?], family: DeviceFamily, hrTimes: [Int],

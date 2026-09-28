@@ -19,6 +19,29 @@ public enum WatchdogEpisodeState: String, Equatable, Sendable, Codable {
     case dataUnavailable
 }
 
+/// Held TRUST for temp / breathing / SpO₂ until that vital’s last reading changes.
+public struct WatchdogSparseTrustHold: Equatable, Sendable, Codable {
+    public var tempTrust: Int
+    public var tempObs: Double?
+    public var respTrust: Int
+    public var respObs: Double?
+    public var spo2Trust: Int
+    public var spo2Obs: Double?
+
+    public static let empty = WatchdogSparseTrustHold()
+
+    public init(tempTrust: Int = 0, tempObs: Double? = nil,
+                respTrust: Int = 0, respObs: Double? = nil,
+                spo2Trust: Int = 0, spo2Obs: Double? = nil) {
+        self.tempTrust = tempTrust
+        self.tempObs = tempObs
+        self.respTrust = respTrust
+        self.respObs = respObs
+        self.spo2Trust = spo2Trust
+        self.spo2Obs = spo2Obs
+    }
+}
+
 public struct WatchdogSignalEvidence: Equatable, Sendable, Codable {
     public var name: String
     public var observed: Double?
@@ -53,6 +76,8 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
     public var lastHeldHRV: Double?
     public var lastHeldTemp: Double?
     public var lastHeldSpO2: Double?
+    /// Last TRUST for sparse vitals. HR coverage must not move these between readings.
+    public var sparseTrust: WatchdogSparseTrustHold
     public var lastJointEnergy: Double
     public var lastSafety: Bool
     public var lastForecastHR: [Double]
@@ -121,6 +146,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
                 priorState: WatchdogEpisodeState? = nil,
                 lastHeldResp: Double? = nil, lastHeldHRV: Double? = nil,
                 lastHeldTemp: Double? = nil, lastHeldSpO2: Double? = nil,
+                sparseTrust: WatchdogSparseTrustHold = .empty,
                 lastJointEnergy: Double = 0, lastSafety: Bool = false,
                 lastForecastHR: [Double] = [], lastForecastHRV: [Double] = [],
                 lastForecastTemp: [Double] = [], lastForecastResp: [Double] = [],
@@ -167,6 +193,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         self.lastHeldHRV = lastHeldHRV
         self.lastHeldTemp = lastHeldTemp
         self.lastHeldSpO2 = lastHeldSpO2
+        self.sparseTrust = sparseTrust
         self.lastJointEnergy = lastJointEnergy
         self.lastSafety = lastSafety
         self.lastForecastHR = lastForecastHR
@@ -233,6 +260,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         lastHeldHRV = try c.decodeIfPresent(Double.self, forKey: .lastHeldHRV)
         lastHeldTemp = try c.decodeIfPresent(Double.self, forKey: .lastHeldTemp)
         lastHeldSpO2 = try c.decodeIfPresent(Double.self, forKey: .lastHeldSpO2)
+        sparseTrust = try c.decodeIfPresent(WatchdogSparseTrustHold.self, forKey: .sparseTrust) ?? .empty
         lastJointEnergy = try c.decodeIfPresent(Double.self, forKey: .lastJointEnergy) ?? 0
         lastSafety = try c.decodeIfPresent(Bool.self, forKey: .lastSafety) ?? false
         lastForecastHR = try c.decodeIfPresent([Double].self, forKey: .lastForecastHR) ?? []
@@ -668,27 +696,47 @@ public enum Watchdog {
             ? tail.hrCoverage(window.hr) : window.coverage
         let trustHR = predictionTrust(energy: eHR, usual: prompt.hr, coverage: trustCoverage,
                                       usualTrust: layer1UsualTrust(evaluations, matching: [.awakeRestHR, .continuousHR]),
-                                      persistTicks: persistTicks, hot: hot.contains("HR"))
+                                      persistTicks: persistTicks, hot: hot.contains("HR"),
+                                      hat: lastHR?.hat)
         let trustRHR = predictionTrust(energy: eRHR, usual: prompt.rhr, coverage: trustCoverage,
                                        usualTrust: layer1UsualTrust(evaluations, matching: [.sleepRHR]),
-                                       persistTicks: persistTicks, hot: hot.contains("RHR"))
-        let trustHRV = {
-            var t = predictionTrust(energy: eHRV, usual: prompt.hrvAwake ?? prompt.hrv, coverage: trustCoverage,
-                                    usualTrust: layer1UsualTrust(evaluations, matching: prompt.hrvAwake != nil
+                                       persistTicks: persistTicks, hot: hot.contains("RHR"),
+                                       hat: lastRHR?.hat)
+        let trustHRV = predictionTrust(energy: eHRV, usual: prompt.hrvAwake ?? prompt.hrv, coverage: trustCoverage,
+                                       usualTrust: layer1UsualTrust(evaluations, matching: prompt.hrvAwake != nil
                                                                  ? [.awakeRestHRVLn] : [.sleepHRVLn]),
-                                    persistTicks: persistTicks, hot: hot.contains("HRV"))
-            if prompt.hrvAnchoredInSleep { t = min(t, 28) }
-            return t
-        }()
-        let trustTemp = predictionTrust(energy: eTemp, usual: prompt.temp, coverage: trustCoverage,
-                                        usualTrust: layer1UsualTrust(evaluations, matching: [.sleepTemp]),
-                                        persistTicks: persistTicks, hot: hot.contains("Temp"))
-        let trustResp = predictionTrust(energy: eResp, usual: prompt.resp, coverage: trustCoverage,
-                                        usualTrust: layer1UsualTrust(evaluations, matching: [.sleepResp]),
-                                        persistTicks: persistTicks, hot: hot.contains("Resp"))
-        let trustSpO2 = predictionTrust(energy: eSpO2, usual: prompt.spo2, coverage: trustCoverage,
-                                        usualTrust: layer1UsualTrust(evaluations, matching: [.sleepSpO2Mean]),
-                                        persistTicks: persistTicks, hot: hot.contains("SpO2"))
+                                       persistTicks: persistTicks, hot: hot.contains("HRV"),
+                                       hat: lastHRV?.hat)
+        let tempC = sparseCoverage(window.temp, paired: lastTemp != nil)
+        let respC = sparseCoverage(window.resp, paired: lastResp != nil)
+        let spo2C = sparseCoverage(window.spo2, paired: lastSpO2 != nil)
+        let trustTemp = holdSparseTrust(
+            computed: predictionTrust(energy: eTemp, usual: prompt.temp, coverage: tempC,
+                                      usualTrust: layer1UsualTrust(evaluations, matching: [.sleepTemp]),
+                                      persistTicks: persistTicks, hot: hot.contains("Temp"),
+                                      hat: lastTemp?.hat),
+            obs: lastTemp?.obs,
+            stillInWindow: window.temp.contains { $0 != nil },
+            heldTrust: &carry.sparseTrust.tempTrust,
+            heldObs: &carry.sparseTrust.tempObs)
+        let trustResp = holdSparseTrust(
+            computed: predictionTrust(energy: eResp, usual: prompt.resp, coverage: respC,
+                                      usualTrust: layer1UsualTrust(evaluations, matching: [.sleepResp]),
+                                      persistTicks: persistTicks, hot: hot.contains("Resp"),
+                                      hat: lastResp?.hat),
+            obs: lastResp?.obs,
+            stillInWindow: window.resp.contains { $0 != nil },
+            heldTrust: &carry.sparseTrust.respTrust,
+            heldObs: &carry.sparseTrust.respObs)
+        let trustSpO2 = holdSparseTrust(
+            computed: predictionTrust(energy: eSpO2, usual: prompt.spo2, coverage: spo2C,
+                                      usualTrust: layer1UsualTrust(evaluations, matching: [.sleepSpO2Mean]),
+                                      persistTicks: persistTicks, hot: hot.contains("SpO2"),
+                                      hat: lastSpO2?.hat),
+            obs: lastSpO2?.obs,
+            stillInWindow: window.spo2.contains { $0 != nil },
+            heldTrust: &carry.sparseTrust.spo2Trust,
+            heldObs: &carry.sparseTrust.spo2Obs)
 
         let sessionPhase = WatchdogPhaseUsualStore.phase(nowUnix: nowUnix,
                                                         sleepBit: sleepSessionOpen || sleepBit)
@@ -807,12 +855,15 @@ public enum Watchdog {
         carry.lastHeldTemp = nil
         carry.lastHeldSpO2 = nil
 
+        let scoredTrusts = signals.filter {
+            $0.name != "Motion" && $0.observed != nil && $0.reconstructed != nil && $0.trustPct > 0
+        }.map(\.trustPct)
         let pageTrust: Int
         if hot.isEmpty {
-            pageTrust = [trustHR, trustRHR, trustHRV, trustTemp, trustResp, trustSpO2].filter { $0 > 0 }.min()
-                ?? Int((window.coverage * 100).rounded())
+            pageTrust = scoredTrusts.min() ?? Int((window.coverage * 100).rounded())
         } else {
-            pageTrust = signals.filter { hot.contains($0.name) }.map(\.trustPct).min() ?? 0
+            pageTrust = signals.filter { hot.contains($0.name) && $0.trustPct > 0 }.map(\.trustPct).min()
+                ?? scoredTrusts.min() ?? 0
         }
         if pageTrust < WatchdogForecastRuntime.earlyTrustFloor {
             carry.earlyTicks = 0
@@ -928,28 +979,69 @@ public enum Watchdog {
         return f.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
     }
 
-    /// Layer 1 TRUST for the series that feed this live channel. Two copies are never averaged:
-    /// each evaluation contributes `max(long, week)`, then the best matching series is kept.
+    /// Layer 1 TRUST for the series that feed this live channel. Same pick order as the hat
+    /// (`matching` first-wins). Two copies of one series are never averaged (`shownCopy`).
     static func layer1UsualTrust(_ evaluations: [LBEvaluation], matching: [LBSeries]) -> Int {
-        evaluations
-            .filter { matching.contains($0.series) }
-            .compactMap { UniTSPrompt.shownCopy($0)?.trust }
-            .max() ?? 0
+        for series in matching {
+            if let ev = evaluations.first(where: { $0.series == series }),
+               let shown = UniTSPrompt.shownCopy(ev) {
+                return shown.trust
+            }
+        }
+        return 0
     }
 
-    /// Live TRUST v2 — how much to believe this vital’s in-range / off call. Not health, not a diagnosis.
+    /// Coverage for a sparse vital: 1 when this reading is still paired, else that series’ own fill.
+    static func sparseCoverage(_ series: [Double?], paired: Bool) -> Double {
+        if paired { return 1 }
+        guard !series.isEmpty else { return 0 }
+        return Double(series.compactMap { $0 }.count) / Double(series.count)
+    }
+
+    /// TRUST for temp / breathing / SpO₂ stays put until that vital’s last observation changes.
+    /// Sliding HR coverage and occupancy must not walk the number between samples.
+    public static func holdSparseTrust(computed: Int, obs: Double?, stillInWindow: Bool,
+                                       heldTrust: inout Int, heldObs: inout Double?) -> Int {
+        if !stillInWindow {
+            heldTrust = 0
+            heldObs = nil
+            return computed
+        }
+        if let obs, obs.isFinite {
+            if heldTrust > 0, let prev = heldObs, abs(prev - obs) < 1e-6 {
+                return heldTrust
+            }
+            heldTrust = computed
+            heldObs = obs
+            return computed
+        }
+        return heldTrust > 0 ? heldTrust : computed
+    }
+
+    /// Live TRUST — how much to believe this vital’s in-range / off call. Not health, not a diagnosis.
     ///
-    /// `50×U + 35×C + 15×E`, then hard caps:
-    /// - **U** personal usual: Layer 1 TRUST 0…1, but only if that TRUST is at least 35 (a shown usual).
-    /// - **C** coverage: fraction of the 30-minute HR window that is filled.
-    /// - **E** evidence: in-range = how close to the reconstruction (`1 − energy/tau`);
-    ///   off = how large and how persistent the residual is.
-    /// - No shown personal usual → cap **28**. No prompt number at all → cap **18**.
+    /// `50×U + 35×C + 15×E`:
+    /// - **U** short-term first: UniTS/prior hat for this channel (`0.55`) once the models have
+    ///   reconstructed it. A shown Layer 1 usual replaces that with that copy’s TRUST 0…1.
+    ///   Layer 1 nights tighten the prompt; they do not gate the half-hour call.
+    /// - **C** coverage of this 30-minute (or rest-tail) window.
+    /// - **E** evidence vs the reconstruction (`1 − energy/tau` in range; persist×magnitude if off).
+    /// - Caps 18 / 28 apply only when there is **no hat and no shown usual** (nothing to compare).
     public static func predictionTrust(energy: Double, usual: Double?, coverage: Double,
-                                       usualTrust: Int, persistTicks: Int, hot: Bool) -> Int {
+                                       usualTrust: Int, persistTicks: Int, hot: Bool,
+                                       hat: Double? = nil) -> Int {
         let coverage01 = max(0, min(1, coverage))
         let usual01 = max(0, min(1, Double(usualTrust) / 100.0))
-        let hasShownUsual = usual != nil && usualTrust >= LongitudinalBaseline.trustHideThreshold
+        let hasLayer1 = usual != nil && usualTrust >= LongitudinalBaseline.trustHideThreshold
+        let hasShortTerm = hat.map(\.isFinite) ?? false
+        let u: Double
+        if hasLayer1 {
+            u = usual01
+        } else if hasShortTerm {
+            u = 0.55
+        } else {
+            u = 0
+        }
         let tau = max(WatchdogCalibration.tNote, 0.01)
         let tauSevere = max(WatchdogCalibration.tSevere, 0.01)
         let evidence: Double
@@ -960,11 +1052,10 @@ public enum Watchdog {
         } else {
             evidence = max(0, 1 - energy / tau)
         }
-        var score = 50.0 * (hasShownUsual ? usual01 : 0)
-            + 35.0 * coverage01
-            + 15.0 * evidence
-        if !hasShownUsual { score = min(score, 28) }
-        if usual == nil { score = min(score, 18) }
+        var score = 50.0 * u + 35.0 * coverage01 + 15.0 * evidence
+        if !hasLayer1 && !hasShortTerm {
+            score = min(score, usual == nil ? 18 : 28)
+        }
         return max(0, min(100, Int(score.rounded())))
     }
 

@@ -204,7 +204,10 @@ public enum WatchdogEventGeometry: Sendable {
             cut = true
             reason = "class-hold"
         }
-        if artifact { cut = true; reason = "artifact" }
+        if artifact, reason != "class-hold" {
+            cut = true
+            reason = "artifact"
+        }
         return WatchdogEventDecision(label: label, cut: cut, cutReason: reason, explained: explained)
     }
 }

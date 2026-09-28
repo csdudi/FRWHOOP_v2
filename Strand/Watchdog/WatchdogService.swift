@@ -61,6 +61,9 @@ final class WatchdogService {
                                        sleepIntervals: sleepIntervals)
         carry = result.carry
         persistCarry()
+        if case .success(let built) = window {
+            model.baseline.ingestImu(samples: built.imu, nowUnix: now)
+        }
         model.baseline.applyWatchdog(result)
         if result.shouldNotify {
             WatchdogNotifier.post(result)
@@ -115,6 +118,7 @@ final class WatchdogService {
         var rrLists: [[RRInterval]] = []
         var tempLists: [[SkinTempSample]] = []
         var spo2Lists: [[SpO2Sample]] = []
+        var respPerMin: [WatchdogScalarSample] = []
         var eventLists: [[WhoopEvent]] = []
         var stepLists: [[StepSample]] = []
         for id in ids {
@@ -122,6 +126,11 @@ final class WatchdogService {
             rrLists.append((try? await store.rrIntervals(deviceId: id, from: from, to: now, limit: 8_000)) ?? [])
             tempLists.append((try? await store.skinTempSamples(deviceId: id, from: from, to: now, limit: limit)) ?? [])
             spo2Lists.append((try? await store.spo2Samples(deviceId: id, from: from, to: now, limit: limit)) ?? [])
+            let respRows = (try? await store.respSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
+            respPerMin.append(contentsOf: WatchdogWindowBuilder.respPerMin(
+                rawRows: respRows.map { (ts: $0.ts, raw: $0.raw) },
+                ringRate: OuraRespScale.isRingRateStream(deviceId: id),
+                start: from, end: now))
             eventLists.append((try? await store.events(deviceId: id, from: from, to: now, limit: 400)) ?? [])
             stepLists.append((try? await store.stepSamples(deviceId: id, from: from, to: now, limit: limit)) ?? [])
         }
@@ -157,15 +166,17 @@ final class WatchdogService {
         )
         let wristOff = WatchdogLiveTape.wristOff(deviceOff: lastWristOff(events), freshLiveHR: liveBeating)
         let spo2Pct = mergeByTs(spo2Lists, ts: \.ts).compactMap { sample -> WatchdogScalarSample? in
-            guard sample.ir <= 0,
-                  AnalyticsEngine.spo2SingleChannelPlausible.contains(sample.red) else { return nil }
-            return WatchdogScalarSample(ts: sample.ts, value: min(Double(sample.red), 100))
+            guard let pct = WatchdogWindowBuilder.percentFromOptical(red: sample.red, ir: sample.ir) else {
+                return nil
+            }
+            return WatchdogScalarSample(ts: sample.ts, value: pct)
         }
         let usedLive = liveHRRing.contains { $0.ts >= from }
         let hrSource: WatchdogHRSource = usedLive ? .live2A37 : (family == .whoop5 ? .ppgHr : .v18)
         let steps = mergeByTs(stepLists, ts: \.ts)
         let feed = WatchdogFeed(family: family, hrSource: hrSource, nowUnix: now,
-                                hr: hr, rr: rr, skinTempC: temps, motion: motion,
+                                hr: hr, rr: rr, skinTempC: temps, respPerMin: respPerMin,
+                                motion: motion,
                                 spo2Pct: spo2Pct, wristOff: wristOff,
                                 holdSeeds: .empty,
                                 imu: imu, steps: steps)

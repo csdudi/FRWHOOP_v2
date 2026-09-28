@@ -19,6 +19,7 @@ struct TreatmentCaregiverView: View {
     @State private var formWashout = 7
     @State private var formPrimaries: Set<LBSeries> = []
     @State private var formNotes = ""
+    @State private var formSchedule: LBMedSchedule = .daily
 
     private var days: [DailyMetric] { store.displayDays(from: repo.days) }
 
@@ -180,6 +181,11 @@ struct TreatmentCaregiverView: View {
                 }
                 TextField("Dose (optional)", text: $formDose)
                     .textFieldStyle(.roundedBorder)
+                Picker("How you take it", selection: $formSchedule) {
+                    ForEach(LBMedSchedule.allCases, id: \.self) { sched in
+                        Text(sched.displayLabel).tag(sched)
+                    }
+                }
                 DatePicker("Start day", selection: $formDay, displayedComponents: .date)
                 DatePicker("Clock time", selection: $formTime, displayedComponents: .hourAndMinute)
                 VStack(alignment: .leading, spacing: 6) {
@@ -223,7 +229,8 @@ struct TreatmentCaregiverView: View {
                                    kind: formKind, days: days,
                                    onsetDays: formOnset, washoutDays: formWashout,
                                    primarySeries: Array(formPrimaries),
-                                   notes: formNotes.isEmpty ? nil : formNotes)
+                                   notes: formNotes.isEmpty ? nil : formNotes,
+                                   schedule: formSchedule)
                     selectedDay = stamp.day
                     formName = ""
                     formDose = ""

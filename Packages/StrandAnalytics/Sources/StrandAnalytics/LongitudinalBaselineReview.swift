@@ -145,7 +145,7 @@ extension LongitudinalBaseline {
             return .movingWaking
         case .continuousHR, .continuousHRVLn, .continuousSpO2Mean:
             return .allHours
-        case .wakingSteps, .wakingActiveMin:
+        case .wakingSteps, .wakingActiveMin, .wakingImuEnergy:
             return .wakingLoad
         }
     }
@@ -187,6 +187,9 @@ extension LongitudinalBaseline {
                                   worse: .either, primaryOff: .thisWeek)
         case .wakingActiveMin:
             return LBSeriesParams(kBand: 2.4, span7: 7, nLongEstablished: 21, floor: 10,
+                                  worse: .either, primaryOff: .thisWeek)
+        case .wakingImuEnergy:
+            return LBSeriesParams(kBand: 2.4, span7: 7, nLongEstablished: 21, floor: 0.02,
                                   worse: .either, primaryOff: .thisWeek)
         }
     }

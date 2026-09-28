@@ -100,6 +100,8 @@ final class FRWhoopCoreBaselineAuditTests: XCTestCase {
                   up: 5_000, down: 5_500, coverage: nil, driftPerDay: 120),
         SeriesCfg(series: .wakingActiveMin, base: 45, noise: 9, lowNoise: 3.5, glitch: 345,
                   up: 30, down: 32, coverage: nil, driftPerDay: 0.8),
+        SeriesCfg(series: .wakingImuEnergy, base: 0.14, noise: 0.02, lowNoise: 0.01, glitch: 1.8,
+                  up: 0.2, down: 0.2, coverage: 90, driftPerDay: 0.002),
     ]
 
     func cfg(_ s: LBSeries) -> SeriesCfg { allCfg.first { $0.series == s }! }
@@ -1222,6 +1224,7 @@ extension FRWhoopCoreBaselineAuditTests {
             (.sleepHRVLn, 62), (.awakeRestHRVLn, nil), (.awakeActiveHRVLn, nil),
             (.continuousHRVLn, nil), (.sleepSpO2Nadir, nil), (.awakeRestSpO2Mean, nil),
             (.awakeActiveSpO2Mean, nil), (.continuousSpO2Mean, nil), (.wakingActiveMin, nil),
+            (.wakingImuEnergy, nil),
         ]
         for (s, want) in expect {
             let got = LongitudinalBaseline.observations(from: [row], series: s).first?.value
@@ -1427,7 +1430,7 @@ extension FRWhoopCoreBaselineAuditTests {
         emit(["test": "WIRING_synthesis", "series": "all",
               "synthesizedNative": "\(synth)", "unwiredCount": "\(unwired.count)",
               "unwired": unwired.joined(separator: ",")])
-        XCTAssertEqual(unwired.count, 11, "11 of 17 series have no real daily column")
+        XCTAssertEqual(unwired.count, 12, "12 of 18 series have no real DailyMetric column")
         XCTAssertFalse(synth,
                        "9 unwired series are currently synthesized from restingHr / avgHrv / spo2Pct "
                        + "(BaselineStore.synthesizedNative), which is a cross-biometric fallback")
@@ -1437,11 +1440,13 @@ extension FRWhoopCoreBaselineAuditTests {
     func test_wiring_everySeriesHasItsOwnSourceColumn() {
         let missing = LBSeries.allCases.filter { $0.planRow.dailyMetricColumn == nil }.map(\.rawValue)
         emit(["test": "WIRING_columns", "series": "all",
-              "withColumn": "\(17 - missing.count)", "withoutColumn": "\(missing.count)",
+              "withColumn": "\(LBSeries.allCases.count - missing.count)",
+              "withoutColumn": "\(missing.count)",
               "missing": missing.joined(separator: ",")])
-        XCTAssertTrue(missing.isEmpty,
-                      "17/17 series need a source column; \(missing.count) have none: "
-                      + missing.joined(separator: ", "))
+        XCTAssertTrue(missing.contains("waking_imu_energy"),
+                      "movement energy is a sidecar tape, not a DailyMetric column")
+        XCTAssertFalse(missing.contains("sleep_rhr"))
+        XCTAssertFalse(missing.contains("waking_steps"))
     }
 }
 

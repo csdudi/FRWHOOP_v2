@@ -231,6 +231,7 @@ final class LongitudinalBaselineReviewTests: XCTestCase {
         XCTAssertEqual(LongitudinalBaseline.stableWindow(for: .sleepHRVLn), .overnightSleep)
         XCTAssertEqual(LongitudinalBaseline.stableWindow(for: .awakeRestHR), .stillWaking)
         XCTAssertEqual(LongitudinalBaseline.stableWindow(for: .wakingSteps), .wakingLoad)
+        XCTAssertEqual(LongitudinalBaseline.stableWindow(for: .wakingImuEnergy), .wakingLoad)
     }
 
     func testKWidensWhenOvernightResidualsAreNoisy() {

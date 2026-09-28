@@ -117,6 +117,11 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
                        center7: 45.9, centerDisplay: 45.9, spread: 11.8, z7: -2.4,
                        bandLo: 22.3, bandHi: 69.5, coverage: nil,
                        centerTol: 0.15, spreadTol: 0.3, zTol: 0.2, bandTol: 0.8),
+            WorkedWeek(series: .wakingImuEnergy,
+                       weekOldestToNewest: [0.12, 0.13, 0.14, 0.15, 0.16, 0.14, 0.13], today: 0.28,
+                       center7: 0.140, centerDisplay: 0.140, spread: 0.020, z7: 7.0,
+                       bandLo: 0.10, bandHi: 0.18, coverage: 90,
+                       centerTol: 0.01, spreadTol: 0.01, zTol: 1.5, bandTol: 0.05),
         ]
     }
 
@@ -152,16 +157,16 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
     // MARK: - Every biometric is a series
 
     func testPlanListsExactlySeventeenBiometrics() {
-        XCTAssertEqual(LBSeries.allCases.count, 17, LongitudinalBaseline.planCatalogText())
+        XCTAssertEqual(LBSeries.allCases.count, 18, LongitudinalBaseline.planCatalogText())
         let ids = LBSeries.allCases.map(\.rawValue)
-        XCTAssertEqual(Set(ids).count, 17)
+        XCTAssertEqual(Set(ids).count, 18)
         let expected = [
             "sleep_rhr", "sleep_hrv_ln", "sleep_temp", "sleep_resp",
             "sleep_spo2_mean", "sleep_spo2_nadir",
             "awake_rest_hr", "awake_rest_hrv_ln", "awake_rest_spo2_mean",
             "awake_active_hr", "awake_active_hrv_ln", "awake_active_spo2_mean",
             "continuous_hr", "continuous_hrv_ln", "continuous_spo2_mean",
-            "waking_steps", "waking_active_min",
+            "waking_steps", "waking_active_min", "waking_imu_energy",
         ]
         XCTAssertEqual(ids, expected, LongitudinalBaseline.planCatalogText())
     }
@@ -189,6 +194,8 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
         XCTAssertNotEqual(LBSeries.awakeRestHR, LBSeries.continuousHR)
         XCTAssertNotEqual(LBSeries.sleepSpO2Mean, LBSeries.sleepSpO2Nadir)
         XCTAssertNotEqual(LBSeries.wakingSteps, LBSeries.wakingActiveMin)
+        XCTAssertNotEqual(LBSeries.wakingImuEnergy.biometricFamily, "motion")
+        XCTAssertTrue(LBSeries.wakingImuEnergy.usesWakingEstablishedN)
         XCTAssertTrue(LBSeries.sleepHRVLn.usesLog)
         XCTAssertTrue(LBSeries.awakeActiveHRVLn.usesLog)
         XCTAssertTrue(LBSeries.continuousHRVLn.usesLog)
@@ -255,11 +262,14 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
         XCTAssertEqual(p.seriesSpec(.continuousSpO2Mean).floor, 0.5)
         XCTAssertEqual(p.seriesSpec(.wakingSteps).floor, 500)
         XCTAssertEqual(p.seriesSpec(.wakingActiveMin).floor, 10)
+        XCTAssertEqual(p.seriesSpec(.wakingImuEnergy).floor, 0.02)
         XCTAssertEqual(p.nLongEstablished(for: .sleepRHR), 14)
         XCTAssertEqual(p.nLongEstablished(for: .awakeRestHR), 14)
         XCTAssertEqual(p.nLongEstablished(for: .awakeActiveHR), 14)
         XCTAssertEqual(p.nLongEstablished(for: .continuousHR), 14)
         XCTAssertEqual(p.nLongEstablished(for: .wakingSteps), 21)
+        XCTAssertEqual(p.nLongEstablished(for: .wakingImuEnergy), 21)
+        XCTAssertEqual(p.nLongEstablished(for: .wakingActiveMin), 21)
     }
 
     func testQualityReasonVocabulary() {
@@ -340,6 +350,7 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
                 case .continuousHR, .continuousHRVLn: return 300
                 case .sleepSpO2Mean, .sleepSpO2Nadir, .awakeRestSpO2Mean,
                      .awakeActiveSpO2Mean, .continuousSpO2Mean: return 16
+                case .wakingImuEnergy: return 90
                 default: return nil
                 }
             }()

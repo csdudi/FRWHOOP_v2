@@ -41,6 +41,10 @@ public enum WatchdogConfig: Sendable {
     public static let hrvDropRefMs = 50.0
     public static let hrvMotionSmoothMinutes = 2
     public static let hrvTrackAlpha = 0.28
+    /// How fast the live HRV center follows this window’s RMSSD (not Layer 1).
+    public static let hrvCenterAlpha = 0.20
+    /// UniTS-AD hat span below this (ms) is treated as prompt-stuck; use the short-term prior.
+    public static let hrvModelFlatSpanMs = 4.0
     /// Wrist temperature falls with activity (masking), not a core-temp rise.
     /// Martínez-Nicolás et al., PLOS ONE 2013.
     public static let tempMotionGain = -0.15

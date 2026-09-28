@@ -57,6 +57,9 @@ final class BaselineStore: ObservableObject {
     @Published var events: [LBTreatmentEvent] = []
     @Published var confoundersByDay: [String: [LBConfounder]] = [:]
     @Published var dayLogsByDay: [String: LBDayLog] = [:]
+    @Published var imuByDay: [String: LBDailyObservation] = [:]
+    private var imuAccByDay: [String: LBImuDayAccumulator] = [:]
+    private var imuLastPersistUnix: Int = 0
     @Published var showStartForm = false
     @Published var showDoseForm = false
     @Published var showEndForm = false
@@ -75,6 +78,7 @@ final class BaselineStore: ObservableObject {
     private let freezeKeyPrefix = "noop.baseline.freeze.v1."
     private let confoundersKey = "noop.baseline.confounders.v1"
     private let dayLogsKey = "noop.baseline.daylog.v1"
+    private let imuKey = "noop.baseline.imu.v1"
     private let dismissedPromptKey = "noop.baseline.dismissedPrompt.v1"
 
     init(defaults: UserDefaults = .standard, asOf: String? = nil, resetCourse: Bool = false) {
@@ -89,6 +93,7 @@ final class BaselineStore: ObservableObject {
             defaults.removeObject(forKey: eventsKey)
             defaults.removeObject(forKey: confoundersKey)
             defaults.removeObject(forKey: dayLogsKey)
+            defaults.removeObject(forKey: imuKey)
             defaults.removeObject(forKey: dismissedPromptKey)
             for series in LBSeries.allCases {
                 defaults.removeObject(forKey: freezeKeyPrefix + series.rawValue)
@@ -96,10 +101,14 @@ final class BaselineStore: ObservableObject {
             self.events = []
             self.confoundersByDay = [:]
             self.dayLogsByDay = [:]
+            self.imuByDay = [:]
+            self.imuAccByDay = [:]
         } else {
             self.events = Self.loadEvents(defaults: defaults)
             self.confoundersByDay = Self.loadConfounders(defaults: defaults)
             self.dayLogsByDay = Self.loadDayLogs(defaults: defaults)
+            self.imuAccByDay = Self.loadImu(defaults: defaults)
+            self.imuByDay = Dictionary(uniqueKeysWithValues: self.imuAccByDay.map { ($0.key, $0.value.observation) })
             self.dismissedPromptDay = defaults.string(forKey: dismissedPromptKey)
         }
     }
@@ -112,7 +121,8 @@ final class BaselineStore: ObservableObject {
     /// use demonstration observations derived from those nights (no WHOOP rest/active windows yet).
     var displayedSeries: [LBSeries] {
         LBSeries.allCases.filter {
-            $0.context == context.lbContext && $0 != .wakingSteps && $0 != .sleepSpO2Nadir
+            if $0 == .wakingImuEnergy { return context == .active }
+            return $0.context == context.lbContext && $0 != .wakingSteps && $0 != .sleepSpO2Nadir
         }
     }
 
@@ -127,6 +137,7 @@ final class BaselineStore: ObservableObject {
         case .sleepSpO2Mean, .awakeRestSpO2Mean, .awakeActiveSpO2Mean, .continuousSpO2Mean: return "SpO₂"
         case .awakeRestHR, .awakeActiveHR, .continuousHR: return "Heart rate"
         case .wakingSteps: return "Steps"
+        case .wakingImuEnergy: return "Movement"
         default: return series.planRow.planName
         }
     }
@@ -152,7 +163,7 @@ final class BaselineStore: ObservableObject {
                 asOf: asOf,
                 series: series,
                 observations: observations(from: days, series: series),
-                trial: .none)
+                trial: LBTrialRequest(dayLogsByDay: dayLogsByDay))
         }
     }
 
@@ -163,7 +174,28 @@ final class BaselineStore: ObservableObject {
 
     /// Scoring tape only. Stub series (no DailyMetric column) stay empty — never +6 / ×0.88 / −0.2.
     func observations(from days: [DailyMetric], series: LBSeries) -> [LBDailyObservation] {
-        LongitudinalBaseline.observations(from: days, series: series)
+        if series == .wakingImuEnergy {
+            return imuAccByDay.values.map(\.observation).sorted { $0.day < $1.day }
+        }
+        return LongitudinalBaseline.observations(from: days, series: series)
+    }
+
+    /// Incremental IMU usual. New samples only; does not write Charge or other Layer 1 series.
+    func ingestImu(samples: [WatchdogIMUSample], nowUnix: Int) {
+        guard !samples.isEmpty else { return }
+        let day = Self.dayKey(Date(timeIntervalSince1970: TimeInterval(nowUnix)))
+        var acc = imuAccByDay[day] ?? LBImuDayAccumulator(day: day)
+        guard acc.add(samples) else { return }
+        imuAccByDay[day] = acc
+        imuByDay[day] = acc.observation
+        if nowUnix - imuLastPersistUnix >= 60 {
+            persistImu()
+            imuLastPersistUnix = nowUnix
+        }
+    }
+
+    var medicationLabelToday: LBMedicationDayLabel {
+        LBMedicationDayLabel.make(asOf: calendarTodayKey, events: events, log: calendarTodayLog)
     }
 
     var card: LBCardCopy { evaluation?.trial.card ?? .monitoring(building: true) }
@@ -386,7 +418,8 @@ final class BaselineStore: ObservableObject {
     func logStart(name: String, dose: String?, civilDay: String, clockTime: String,
                   enteredBy: LBEnteredBy, kind: LBTreatmentKind = .medication,
                   days: [DailyMetric], onsetDays: Int? = 7, washoutDays: Int? = 7,
-                  primarySeries: [LBSeries] = [], notes: String? = nil) {
+                  primarySeries: [LBSeries] = [], notes: String? = nil,
+                  schedule: LBMedSchedule = .daily) {
         var watching = Array(primarySeries.prefix(3))
         if watching.isEmpty {
             watching = suggestWatchSeries(days: days, asOf: civilDay)
@@ -395,7 +428,7 @@ final class BaselineStore: ObservableObject {
             trialId: UUID().uuidString, type: .start, civilDay: civilDay, clockTime: clockTime,
             displayName: name, kind: kind, doseText: dose, enteredBy: enteredBy,
             notes: notes, onsetDays: onsetDays, washoutDays: washoutDays,
-            primarySeries: watching)
+            primarySeries: watching, schedule: schedule)
         events.append(event)
         persistEvents()
         invalidateFreezes()
@@ -761,6 +794,18 @@ final class BaselineStore: ObservableObject {
         if let data = try? JSONEncoder().encode(dayLogsByDay) {
             defaults.set(data, forKey: dayLogsKey)
         }
+    }
+
+    private func persistImu() {
+        if let data = try? JSONEncoder().encode(Array(imuAccByDay.values)) {
+            defaults.set(data, forKey: imuKey)
+        }
+    }
+
+    private static func loadImu(defaults: UserDefaults) -> [String: LBImuDayAccumulator] {
+        guard let data = defaults.data(forKey: "noop.baseline.imu.v1"),
+              let rows = try? JSONDecoder().decode([LBImuDayAccumulator].self, from: data) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: rows.map { ($0.day, $0) })
     }
 
     private static func loadEvents(defaults: UserDefaults) -> [LBTreatmentEvent] {

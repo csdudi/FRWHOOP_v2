@@ -403,25 +403,31 @@ final class WatchdogUniTSTests: XCTestCase {
         XCTAssertNotEqual(hat.compactMap { $0 }.last ?? 0, 96, accuracy: 0.5)
     }
 
-    func testSleepHRVStaysPersonalUntilAwakeUsualExists() throws {
+    func testLiveHRVHatTracksThisWindowNotAFlatSleepUsual() throws {
         let occ = Array(repeating: 0.0, count: 30)
-        let observed: [Double?] = Array(repeating: 126, count: 30)
-        let sleepOnly = UniTSRuntime.reconstructHRV(
+        let observed: [Double?] = Array(repeating: 80, count: 30)
+        let sleepSeed = UniTSRuntime.reconstructHRV(
             observed: observed,
             prompt: UniTSPrompt(hrv: 177, hrvAnchoredInSleep: true),
             occupancy: occ)
-        XCTAssertEqual(try XCTUnwrap(sleepOnly.last ?? nil), 177, accuracy: 0.5)
+        let lastSleep = try XCTUnwrap(sleepSeed.last ?? nil)
+        XCTAssertLessThan(abs(lastSleep - 80), 25)
+        XCTAssertGreaterThan(abs(lastSleep - 177), 40)
         let withAwake = UniTSRuntime.reconstructHRV(
             observed: observed,
-            prompt: UniTSPrompt(hrv: 177, hrvAwake: 120),
+            prompt: UniTSPrompt(hrv: 177, hrvAwake: 70),
             occupancy: occ)
-        XCTAssertEqual(try XCTUnwrap(withAwake.last ?? nil), 120, accuracy: 0.5)
+        XCTAssertEqual(try XCTUnwrap(withAwake.last ?? nil), 80, accuracy: 8)
         let moving = UniTSRuntime.reconstructHRV(
             observed: observed,
-            prompt: UniTSPrompt(hrv: 50),
+            prompt: UniTSPrompt(hrv: 80),
             occupancy: Array(repeating: 1.0, count: 30))
         let moved = try XCTUnwrap(moving.last ?? nil)
-        XCTAssertEqual(moved, 50 - WatchdogConfig.hrvExerciseDropMs, accuracy: 0.2)
+        XCTAssertLessThan(moved, 80)
+        let flatModel: [Double?] = Array(repeating: 177, count: 30)
+        let prior = UniTSRuntime.reconstructHRV(observed: observed, prompt: UniTSPrompt(hrv: 177), occupancy: occ)
+        let blended = UniTSRuntime.liveHrvHat(model: flatModel, prior: prior, observed: observed)
+        XCTAssertEqual(blended.last ?? nil, prior.last ?? nil)
     }
 
     func testOneMinuteSpikeIsNotSevere() throws {
@@ -475,7 +481,8 @@ final class WatchdogEpisodeTests: XCTestCase {
         let r = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
                                   nowUnix: 10, inject: .learning)
         XCTAssertEqual(r.promptSource, .population)
-        XCTAssertLessThan(r.trustPct, LongitudinalBaseline.trustHideThreshold)
+        XCTAssertGreaterThanOrEqual(r.trustPct, LongitudinalBaseline.trustHideThreshold,
+                                    "short-term hat is enough; Layer 1 is not required")
         XCTAssertFalse(r.shouldNotify)
     }
 
@@ -597,20 +604,40 @@ final class WatchdogEpisodeTests: XCTestCase {
         XCTAssertEqual(WatchdogConfig.configVersion, "watchdog-v2.5")
         XCTAssertEqual(WatchdogForecastRuntime.modelVersion, "timesfm3-student-v2")
         XCTAssertEqual(WatchdogConfig.coreMLCheckpoint, "UniTS_AD.mlpackage")
-        // v2: 50×0.80 + 35×0.90 + 15×1.00 = 86.5 → 87 (shown usual, full coverage, clear off)
+        // Layer 1 shown: 50×0.80 + 35×0.90 + 15×1.00 = 86.5 → 87
         XCTAssertEqual(Watchdog.predictionTrust(energy: 2.4, usual: 58, coverage: 0.9,
                                                 usualTrust: 80, persistTicks: 3, hot: true), 87)
-        // No prompt → cap 18 even if coverage is complete
+        // No hat and no prompt → cap 18
         XCTAssertEqual(Watchdog.predictionTrust(energy: 0, usual: nil, coverage: 1,
                                                 usualTrust: 80, persistTicks: 0, hot: false), 18)
-        // Prompt exists but Layer 1 TRUST is below the 35 hide bar → cap 28
-        let weakUsual = Watchdog.predictionTrust(energy: 0.2, usual: 120, coverage: 0.9,
-                                                 usualTrust: 20, persistTicks: 0, hot: false)
-        XCTAssertLessThanOrEqual(weakUsual, 28)
-        XCTAssertGreaterThan(weakUsual, 10)
+        // Short-term hat without Layer 1: not capped at 18 / 28
+        let shortTerm = Watchdog.predictionTrust(energy: 0, usual: nil, coverage: 1,
+                                                 usualTrust: 0, persistTicks: 0, hot: false, hat: 62)
+        XCTAssertGreaterThanOrEqual(shortTerm, LongitudinalBaseline.trustHideThreshold)
+        XCTAssertEqual(shortTerm, Int((50.0 * 0.55 + 35.0 + 15.0).rounded()))
         // In-range with a shown usual: 50×0.80 + 35×0.90 + 15×1.00 = 87
         XCTAssertEqual(Watchdog.predictionTrust(energy: 0, usual: 58, coverage: 0.9,
                                                 usualTrust: 80, persistTicks: 0, hot: false), 87)
+    }
+
+    func testSparseTrustHoldsUntilTheReadingChanges() {
+        var trust = 0
+        var obs: Double?
+        let first = Watchdog.holdSparseTrust(computed: 62, obs: 33.1, stillInWindow: true,
+                                             heldTrust: &trust, heldObs: &obs)
+        XCTAssertEqual(first, 62)
+        let same = Watchdog.holdSparseTrust(computed: 74, obs: 33.1, stillInWindow: true,
+                                            heldTrust: &trust, heldObs: &obs)
+        XCTAssertEqual(same, 62)
+        let next = Watchdog.holdSparseTrust(computed: 70, obs: 33.4, stillInWindow: true,
+                                            heldTrust: &trust, heldObs: &obs)
+        XCTAssertEqual(next, 70)
+        let gone = Watchdog.holdSparseTrust(computed: 18, obs: nil, stillInWindow: false,
+                                            heldTrust: &trust, heldObs: &obs)
+        XCTAssertEqual(gone, 18)
+        XCTAssertEqual(WatchdogWindowBuilder.percentFromOptical(red: 96, ir: 0), 96)
+        XCTAssertEqual(WatchdogWindowBuilder.percentFromOptical(red: 97, ir: 12_000), 97)
+        XCTAssertNil(WatchdogWindowBuilder.percentFromOptical(red: 18_000, ir: 17_000))
     }
 
     func testLiveHRVPromptUsesSleepDisplayMillisecondsNotDemoAwakeRest() {

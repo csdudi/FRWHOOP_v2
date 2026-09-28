@@ -238,7 +238,9 @@ public struct UniTSRuntime: Sendable {
         }
         let hatHR = hat(0, valid: bases[0] != nil)
         let hatRHR = hat(1, valid: bases[1] != nil)
-        let hatHRV = hat(2, valid: bases[2] != nil)
+        let modelHRV = hat(2, valid: bases[2] != nil)
+        let priorHRV = reconstructHRV(observed: window.hrv, prompt: prompt, occupancy: occupancy)
+        let hatHRV = liveHrvHat(model: modelHRV, prior: priorHRV, observed: window.hrv)
         let hatTemp = hat(3, valid: bases[3] != nil)
         let hatResp = hat(4, valid: bases[4] != nil)
         let hatSpO2 = hat(5, valid: bases[5] != nil)
@@ -430,16 +432,40 @@ public struct UniTSRuntime: Sendable {
         }
     }
 
-    /// Live RMSSD: shown awake-rest usual if it exists; otherwise this person's sleep HRV;
-    /// otherwise this window's median until a Layer 1 copy exists.
+    /// Live RMSSD hat: slow center of *this* half-hour, then occupancy drop.
+    /// A sleep usual may seed the first minutes; it is not a flat live line. TimesFM is not this line.
     static func reconstructHRV(observed: [Double?], prompt: UniTSPrompt, occupancy: [Double]) -> [Double?] {
         let smooth = trailingMean(occupancy, taps: WatchdogConfig.hrvMotionSmoothMinutes)
-        let rest = prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv
-        let target: [Double?] = zip(observed, smooth).map { _, occ in
+        let seed = prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv
+        let center = shortTermHrvCenter(observed: observed, seed: seed)
+        let target: [Double?] = zip(center, smooth).map { rest, occ in
             let drop = WatchdogConfig.hrvExerciseDropMs * occ * (rest / WatchdogConfig.hrvDropRefMs)
             return clamp(rest - drop, lo: WatchdogConfig.rmssdLow, hi: WatchdogConfig.rmssdHigh)
         }
         return track(target, alpha: WatchdogConfig.hrvTrackAlpha)
+    }
+
+    /// Causal EMA of observed RMSSD. Empty minutes hold the last center (reconstruction, not a new sample).
+    static func shortTermHrvCenter(observed: [Double?], seed: Double) -> [Double] {
+        let a = WatchdogConfig.hrvCenterAlpha
+        var last = seed
+        return observed.map { value in
+            if let value, value.isFinite {
+                last = (1 - a) * last + a * value
+            }
+            return last
+        }
+    }
+
+    /// UniTS-AD reconstructs toward a constant prompt, so hat HRV is often flat. If the model
+    /// barely moves while this window has live RMSSD, use the short-term prior for the card.
+    static func liveHrvHat(model: [Double?], prior: [Double?], observed: [Double?]) -> [Double?] {
+        let hats = model.compactMap { $0 }
+        let obs = observed.compactMap { $0 }
+        guard hats.count >= 8, obs.count >= 5 else { return prior }
+        let span = (hats.max() ?? 0) - (hats.min() ?? 0)
+        if span < WatchdogConfig.hrvModelFlatSpanMs { return prior }
+        return model
     }
 
     /// Wrist skin temp: activity *decreases* expected WT (masking), lagged, then EMA.

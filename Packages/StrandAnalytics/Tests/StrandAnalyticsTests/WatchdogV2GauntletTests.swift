@@ -358,7 +358,7 @@ final class WatchdogV2GauntletTests: XCTestCase {
         let hat = UniTSRuntime.reconstructHRV(observed: Array(repeating: Optional(20.0), count: 30),
                                               prompt: p, occupancy: occ)
         let last = hat.compactMap { $0 }.last ?? -1
-        XCTAssertEqual(last, 20, accuracy: 0.6)
+        XCTAssertEqual(last, 20, accuracy: 3)
         XCTAssertGreaterThan(abs(last - 50), 20)
     }
 

@@ -25,6 +25,45 @@ public enum LBTreatmentKind: String, Equatable, Sendable, Codable, CaseIterable 
     case supplement
     case procedure
     case other
+
+    public var displayLabel: String {
+        switch self {
+        case .medication: return "Medication"
+        case .supplement: return "Supplement"
+        case .procedure: return "Procedure"
+        case .other: return "Other"
+        }
+    }
+}
+
+/// How the wearer takes the logged course. Label only — never inferred from heart rate.
+public enum LBMedSchedule: String, Equatable, Sendable, Codable, CaseIterable, Hashable {
+    case daily
+    case asNeeded = "as_needed"
+    case course
+
+    public var displayLabel: String {
+        switch self {
+        case .daily: return "Every day"
+        case .asNeeded: return "As needed"
+        case .course: return "A course"
+        }
+    }
+}
+
+/// Whether today's log says they took the scheduled course. Extra / another med is a separate flag.
+public enum LBScheduledMedStatus: String, Equatable, Sendable, Codable, CaseIterable, Hashable {
+    case unspecified
+    case taken
+    case missed
+
+    public var displayLabel: String {
+        switch self {
+        case .unspecified: return "Not logged"
+        case .taken: return "Took scheduled"
+        case .missed: return "Missed scheduled"
+        }
+    }
 }
 
 public enum LBEnteredBy: String, Equatable, Sendable, Codable {
@@ -166,6 +205,10 @@ public struct LBDayLog: Equatable, Sendable, Codable {
     public var sleepTypical: Bool
     public var dietTypical: Bool
     public var extraMed: Bool
+    /// Scheduled course from the Treatment tab — does not drop the night from usuals.
+    public var scheduledMed: LBScheduledMedStatus
+    /// Wearer note. Never used as a drug-cause claim.
+    public var medNote: String?
     public var notes: String?
     public var mood: LBDayMood
     public var activeWindow: LBActiveWindow
@@ -174,7 +217,8 @@ public struct LBDayLog: Equatable, Sendable, Codable {
 
     public init(workout: LBWorkoutLoad = .none, alcohol: Bool = false, travel: Bool = false,
                 feltIll: Bool = false, sleepTypical: Bool = true, dietTypical: Bool = true,
-                extraMed: Bool = false, notes: String? = nil,
+                extraMed: Bool = false, scheduledMed: LBScheduledMedStatus = .unspecified,
+                medNote: String? = nil, notes: String? = nil,
                 mood: LBDayMood = .okay, activeWindow: LBActiveWindow = .spread,
                 energy: LBDayEnergy = .steady, demand: LBDayDemand = .usual) {
         self.workout = workout
@@ -184,6 +228,8 @@ public struct LBDayLog: Equatable, Sendable, Codable {
         self.sleepTypical = sleepTypical
         self.dietTypical = dietTypical
         self.extraMed = extraMed
+        self.scheduledMed = scheduledMed
+        self.medNote = medNote
         self.notes = notes
         self.mood = mood
         self.activeWindow = activeWindow
@@ -200,6 +246,8 @@ public struct LBDayLog: Equatable, Sendable, Codable {
         sleepTypical = try c.decodeIfPresent(Bool.self, forKey: .sleepTypical) ?? true
         dietTypical = try c.decodeIfPresent(Bool.self, forKey: .dietTypical) ?? true
         extraMed = try c.decodeIfPresent(Bool.self, forKey: .extraMed) ?? false
+        scheduledMed = try c.decodeIfPresent(LBScheduledMedStatus.self, forKey: .scheduledMed) ?? .unspecified
+        medNote = try c.decodeIfPresent(String.self, forKey: .medNote)
         notes = try c.decodeIfPresent(String.self, forKey: .notes)
         mood = try c.decodeIfPresent(LBDayMood.self, forKey: .mood) ?? .okay
         activeWindow = try c.decodeIfPresent(LBActiveWindow.self, forKey: .activeWindow) ?? .spread
@@ -225,6 +273,8 @@ public struct LBDayLog: Equatable, Sendable, Codable {
         if !sleepTypical { parts.append("Sleep off-typical") }
         if !dietTypical { parts.append("Diet off-typical") }
         if extraMed { parts.append("Another med") }
+        if scheduledMed == .taken { parts.append("Took scheduled") }
+        if scheduledMed == .missed { parts.append("Missed scheduled") }
         return parts.joined(separator: " · ")
     }
 
@@ -235,6 +285,48 @@ public struct LBDayLog: Equatable, Sendable, Codable {
         if travel { chips.append(.travel) }
         if extraMed { chips.append(.concomitantMed) }
         return chips
+    }
+}
+
+/// Wearer-facing medication labels for one civil day. Never a cause claim.
+public struct LBMedicationDayLabel: Equatable, Sendable {
+    public var courseName: String?
+    public var kind: LBTreatmentKind?
+    public var schedule: LBMedSchedule?
+    public var phase: LBTrialPhase
+    public var scheduledStatus: LBScheduledMedStatus
+    public var extraMed: Bool
+    public var wearerLine: String
+
+    public static func make(asOf: String, events: [LBTreatmentEvent],
+                            log: LBDayLog?) -> LBMedicationDayLabel {
+        let clock = LongitudinalBaseline.trialClock(events: events, asOf: asOf)
+        let extra = log?.extraMed ?? false
+        let scheduled = log?.scheduledMed ?? .unspecified
+        var parts: [String] = []
+        if let start = clock.start, clock.phase != .none {
+            parts.append(start.bannerName)
+            parts.append(start.kind.displayLabel)
+            parts.append(start.schedule.displayLabel)
+            switch clock.phase {
+            case .settlingIn: parts.append("Settling in")
+            case .onTreatment: parts.append("On course")
+            case .washingOut: parts.append("Washing out")
+            case .ended: parts.append("Ended")
+            case .none: break
+            }
+            if scheduled != .unspecified { parts.append(scheduled.displayLabel) }
+        }
+        if extra { parts.append("Another medication today") }
+        if parts.isEmpty { parts.append("No medication label today") }
+        return LBMedicationDayLabel(
+            courseName: clock.start?.bannerName,
+            kind: clock.start?.kind,
+            schedule: clock.start?.schedule,
+            phase: clock.phase,
+            scheduledStatus: scheduled,
+            extraMed: extra,
+            wearerLine: parts.joined(separator: " · "))
     }
 }
 
@@ -303,6 +395,7 @@ public struct LBTreatmentEvent: Equatable, Sendable, Codable {
     public var patientSaysClear: Bool
     public var patientStillFeeling: Bool
     public var primarySeries: [LBSeries]
+    public var schedule: LBMedSchedule
 
     public init(trialId: String, type: LBTreatmentEventType, civilDay: String,
                 clockTime: String = "07:00", displayName: String,
@@ -311,7 +404,8 @@ public struct LBTreatmentEvent: Equatable, Sendable, Codable {
                 notes: String? = nil, onsetDays: Int? = nil, washoutDays: Int? = nil,
                 lastDoseDay: String? = nil, lastDoseClock: String? = nil,
                 patientSaysClear: Bool = false, patientStillFeeling: Bool = false,
-                primarySeries: [LBSeries] = []) {
+                primarySeries: [LBSeries] = [],
+                schedule: LBMedSchedule = .daily) {
         self.trialId = trialId
         self.type = type
         self.civilDay = civilDay
@@ -329,6 +423,29 @@ public struct LBTreatmentEvent: Equatable, Sendable, Codable {
         self.patientSaysClear = patientSaysClear
         self.patientStillFeeling = patientStillFeeling
         self.primarySeries = primarySeries
+        self.schedule = schedule
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        trialId = try c.decode(String.self, forKey: .trialId)
+        type = try c.decode(LBTreatmentEventType.self, forKey: .type)
+        civilDay = try c.decode(String.self, forKey: .civilDay)
+        clockTime = try c.decode(String.self, forKey: .clockTime)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        kind = try c.decodeIfPresent(LBTreatmentKind.self, forKey: .kind) ?? .medication
+        doseText = try c.decodeIfPresent(String.self, forKey: .doseText)
+        enteredBy = try c.decodeIfPresent(LBEnteredBy.self, forKey: .enteredBy) ?? .patient
+        stopReason = try c.decodeIfPresent(LBStopReason.self, forKey: .stopReason)
+        notes = try c.decodeIfPresent(String.self, forKey: .notes)
+        onsetDays = try c.decodeIfPresent(Int.self, forKey: .onsetDays)
+        washoutDays = try c.decodeIfPresent(Int.self, forKey: .washoutDays)
+        lastDoseDay = try c.decodeIfPresent(String.self, forKey: .lastDoseDay)
+        lastDoseClock = try c.decodeIfPresent(String.self, forKey: .lastDoseClock)
+        patientSaysClear = try c.decodeIfPresent(Bool.self, forKey: .patientSaysClear) ?? false
+        patientStillFeeling = try c.decodeIfPresent(Bool.self, forKey: .patientStillFeeling) ?? false
+        primarySeries = try c.decodeIfPresent([LBSeries].self, forKey: .primarySeries) ?? []
+        schedule = try c.decodeIfPresent(LBMedSchedule.self, forKey: .schedule) ?? .daily
     }
 
     public var bannerName: String {

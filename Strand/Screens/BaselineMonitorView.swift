@@ -251,7 +251,7 @@ struct BaselineMonitorView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Text(store.activeStart == nil
                          ? "Log a start so Baseline can freeze the untreated usual."
-                         : "Doses, wash clocks, and the watch list live on Treatment.")
+                         : store.medicationLabelToday.wearerLine)
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -418,6 +418,7 @@ struct BaselineMonitorView: View {
             return value >= 100 ? String(format: "%.0f", value) : String(format: "%.1f", value)
         }
         if unit == "steps" { return String(format: "%.0f %@", value, unit) }
+        if unit == "g" { return String(format: "%.2f %@", value, unit) }
         return String(format: "%.1f %@", value, unit)
     }
 }
@@ -724,6 +725,7 @@ struct BaselineDayLogSheet: View {
     @State private var travel = false
     @State private var feltIll = false
     @State private var extraMed = false
+    @State private var scheduledMed: LBScheduledMedStatus = .unspecified
     @State private var sleepTypical = true
     @State private var dietTypical = true
 
@@ -757,11 +759,20 @@ struct BaselineDayLogSheet: View {
                         pillRow([true, false], selection: $dietTypical, label: { $0 ? "Typical" : "Not typical" })
                     }
                     question(7, "Anything that stood out?") {
-                        VStack(spacing: 0) {
-                            toggle("Alcohol", $alcohol)
-                            toggle("Travel", $travel)
-                            toggle("Felt ill", $feltIll)
-                            toggle("Another medication", $extraMed)
+                        VStack(alignment: .leading, spacing: 10) {
+                            if store.activeStart != nil {
+                                Text("Scheduled course")
+                                    .font(StrandFont.caption)
+                                    .foregroundStyle(StrandPalette.textTertiary)
+                                pillRow(LBScheduledMedStatus.allCases.filter { $0 != .unspecified } + [.unspecified],
+                                        selection: $scheduledMed, label: { $0.displayLabel })
+                            }
+                            VStack(spacing: 0) {
+                                toggle("Alcohol", $alcohol)
+                                toggle("Travel", $travel)
+                                toggle("Felt ill", $feltIll)
+                                toggle("Another medication", $extraMed)
+                            }
                         }
                     }
                     question(8, "Was last night’s sleep typical for you?") {
@@ -770,7 +781,8 @@ struct BaselineDayLogSheet: View {
                     NoopButton("Save daily log", systemImage: "checkmark") {
                         let log = LBDayLog(workout: workout, alcohol: alcohol, travel: travel,
                                            feltIll: feltIll, sleepTypical: sleepTypical,
-                                           dietTypical: dietTypical, extraMed: extraMed, mood: mood,
+                                           dietTypical: dietTypical, extraMed: extraMed,
+                                           scheduledMed: scheduledMed, mood: mood,
                                            activeWindow: activeWindow, energy: energy, demand: demand)
                         store.setDayLog(log, on: store.loggingDay, days: days)
                     }
@@ -794,6 +806,7 @@ struct BaselineDayLogSheet: View {
                     travel = log.travel
                     feltIll = log.feltIll
                     extraMed = log.extraMed
+                    scheduledMed = log.scheduledMed
                     sleepTypical = log.sleepTypical
                     dietTypical = log.dietTypical
                 }
