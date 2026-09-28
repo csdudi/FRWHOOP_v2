@@ -21,6 +21,11 @@ tree, Edge functions, or hosted migrations.
 There is **no Node API** in this fork. The retired Node server tree was removed in Phase 6
 (see `MIGRATION.md`).
 
+## Baselines (this fork’s product docs)
+
+Only [`docs/baselines/`](baselines/README.md) is published: Layer 1 usuals and live Watchdog.
+Working notes and daily logs are not part of the GitHub tree.
+
 ## Privacy
 
 The hosted stack stores only what the owner's devices push. No third-party telemetry is added beyond

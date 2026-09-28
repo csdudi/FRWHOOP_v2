@@ -4,8 +4,7 @@ import WhoopStore
 
 /// FRWHOOP CORE BASELINE CORRECTNESS AUDIT (2026-09-17).
 ///
-/// Source of truth: Packages/StrandAnalytics/Baseline/FRWHOOP_BASELINE_CONDENSED_PLAN.md and
-/// FRWHOOP_BASELINE_FINAL_PLAN.md. Audit report: FRWHOOP_CORE_BASELINE_AUDIT_2026-09-17.md.
+/// Published map: docs/baselines/LAYER1.md. Working math notes stay local, not on GitHub.
 ///
 /// Audit-only harness. It never changes production behaviour and never retunes a k value.
 /// Every test emits machine-readable `RESULT|...` lines so the report tables can be built from

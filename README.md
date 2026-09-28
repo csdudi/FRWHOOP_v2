@@ -2,9 +2,11 @@
   <img src="docs/assets/logo-v3.png" alt="NOOP" width="72">
 </p>
 
-<h1 align="center">NOOP</h1>
+<h1 align="center">FRWHOOP</h1>
 
-<p align="center"><b>Your strap. Your data. Your machine. Offline, on-device, no cloud.</b></p>
+<p align="center"><b>Personal baselines on your phone — long-term usuals, live Watchdog, Charge left alone.</b></p>
+
+<p align="center"><sub>Fork of <a href="https://github.com/ryanbr/NOOP">NOOP</a>. Same offline strap companion. This tree’s work is the <b>Baseline</b> tab: Layer 1 usuals + a 30-minute Watchdog. See <a href="docs/baselines/README.md">docs/baselines</a>.</sub></p>
 
 <p align="center"><sub>Now in the all-new <b>Liquid Metal</b> design: one living look across iPhone, Android and Mac.</sub></p>
 
@@ -45,6 +47,22 @@
   <img src="docs/assets/shot-android-trend.png" alt="A metric's own trend on Android" width="218">
 </p>
 <p align="center"><sub>The all-new <b>Liquid Metal</b> look: living liquid scores, a sky that moves with your day, rebuilt on every screen. The same Today on iPhone and Android, and a metric&rsquo;s own trend. One design across iPhone, Android &amp; Mac.</sub></p>
+
+---
+
+## This fork: baselines
+
+FRWHOOP_v2 is built around **three on-device baselines**. They do not share a score and they do not write each other.
+
+| Baseline | What it answers | Where it lives |
+|---|---|---|
+| **Charge / Effort / Rest** | Today’s recovery and load (existing NOOP stack) | Today ring — Watchdog and Layer 1 do **not** rewrite it |
+| **Layer 1 usuals** | What is usual across nights (7-day and 60-day copies, never averaged) | Baseline tab, long-term boxes — [how it works](docs/baselines/LAYER1.md) |
+| **Watchdog** | Did the last 30 minutes look like this person? | Baseline tab, live card — [how it works](docs/baselines/WATCHDOG.md) |
+
+Watchdog may **read** a shown Layer 1 usual as a prompt. It never writes Layer 1. Neither path infers a treatment start from heart rate or names a drug. TRUST under 35% means the live card is still learning.
+
+Published baseline docs are only those three files under [`docs/baselines/`](docs/baselines/README.md). Daily logs and working notes stay off this GitHub tree.
 
 ---
 
@@ -124,6 +142,7 @@ from **their own device**, on a machine **they** control.
 
 ## Contents
 
+- [This fork: baselines](#this-fork-baselines)
 - [Why NOOP](#why-noop)
 - [Features](#features)
 - [Platform status](#platform-status)
@@ -602,6 +621,8 @@ That's it — copy away.
 
 ## Docs
 
+- [`docs/baselines/`](docs/baselines/README.md) — Layer 1 and Watchdog (the only published baseline docs).
+- [`docs/SCOPE.md`](docs/SCOPE.md) — how this fork differs from upstream NOOP.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history and what to expect (also shown in-app under **What's new**).
 - [`DISCLAIMER.md`](DISCLAIMER.md) — trademark, interoperability, and medical/legal notice.
 - [`ATTRIBUTION.md`](ATTRIBUTION.md) — full credits and licensing notes.

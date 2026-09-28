@@ -1,6 +1,6 @@
 # CLAUDE.md — working on FRWHOOP_v2
 
-Read [`docs/SCOPE.md`](docs/SCOPE.md) first. This fork **differs from upstream NOOP**: it ships a
+Read [`docs/SCOPE.md`](docs/SCOPE.md) first. Baseline product docs: [`docs/baselines/`](docs/baselines/README.md). This fork **differs from upstream NOOP**: it ships a
 hosted Supabase/B2 push receiver (`supabase/functions/`) for the owner's devices. The `supabase/` tree
 and Edge workers are **in scope** — not an upstream violation.
 
