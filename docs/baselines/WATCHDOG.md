@@ -17,17 +17,19 @@ Layer 1 is optional **input**. A shown usual (and a mature still sidecar) may ti
 
 ## Loop (on the phone)
 
-`WatchdogService.tick` → 30×60 s window → `Watchdog.evaluate`:
+`WatchdogService.tick` (foreground ~20 s, or a background refresh) → **active strap only** → 30×60 s window → `Watchdog.evaluate`:
 
-1. **Quality** — coverage, freshness, gaps. Wrist-off does not run the models.
-2. **Activity** — motion / steps / class as a hint, not a calendar workout title.
-3. **Prompt** — UniTS / the Swift prior reconstruct this half-hour first. A shown Layer 1 usual (HR ≠ RHR) and a mature phase×activity sidecar may *tighten* that prompt. They do not block the short-term call. Still no Layer 1 write.
-4. **UniTS reconstruct** — dotted expected line and predicted range for HR, RHR, HRV, temp, breathing, SpO₂. That corridor **is** the short-term baseline.
-5. **Direction** — all six channels, equal weight. \(J = \sum \min(\|r_k\|, 1)\). RHR is not a second HR addend.
-6. **TimesFM** — at most once a minute. Official path is TimesFM **2.5** (Apache-2.0). TimesFM **3.0** weights are non-commercial and must not ship. Can show **Looking ahead**. Cannot severe-notify.
-7. **Events** — exclusive name after a 120 s family hold. No human labels. Workout only if reconstruction is quiet.
-8. **Green band** — small σ updates on the current phase×activity key after 14 **minutes** (still/sleep, or a held workout family). A walk key does not write the still key. Forecast-drift and spikes do not widen it. Session ±5% after ready + 8 min.
-9. **Safety** — still-wrist extrema can page without the models.
+1. **Quality** — coverage, HR gaps, wrist-off. `deviceOff` wins; a leftover 2A37 clock cannot clear WRIST_OFF. Unavailable does not run the models.
+2. **Clocks** — each vital has its own freshness (HR/RHR: WHOOP packet clock; HRV 5 min; temp 8 min; resp / SpO₂ 6 min). Stale series are wiped (`maskStaleChannels`) **before** UniTS / TimesFM. Missing is nil, not BPM 0. Residuals and learning skip absent channels. The same sparse minute is not a new sample.
+3. **Activity** — the 20-col row drives occupancy every minute. Unknown stays unknown (not walk). First **exercise** family holds 120 s before a workout name. After effort, still-band and rest day-tape wait 20 min; models still infer.
+4. **Prompt** — UniTS / the Swift prior reconstruct this half-hour first. A shown Layer 1 usual (HR ≠ RHR) and a mature phase×activity sidecar may *tighten* that prompt. They do not block the short-term call. `evaluate` never writes 7-day / 60-day snapshots.
+5. **UniTS reconstruct** — dotted expected line and predicted range for HR, RHR, HRV, temp, breathing, SpO₂. That corridor **is** the short-term baseline (model σ, not Layer 1 MAD).
+6. **Direction** — two scores. Tanh `joint` decides “UniTS explained this strip” (workout names). Clip-sum `severityJoint` (RHR out, each \|r\| capped at 1) decides severe. If severity is severe, the name cannot stay `normal_*`.
+7. **TimesFM** — at most once a minute (`forecastSource`: official session, hold, or test inject). Official **weights** we intend are TimesFM **2.5-200m** (Apache-2.0). TimesFM **3.0** must not ship. Can show **Looking ahead**. Cannot severe-notify. Background ticks may skip TimesFM and still run UniTS + safety.
+8. **Confounders** — felt-ill / extra med **today** (calendar day, not Layer 1 `asOf`) stops still-band and rest-tape learning. Models still draw. Open sleep may still use yesterday’s log.
+9. **Green band** — small σ updates on the current phase×activity key after 14 **present** minutes of that channel (still/sleep, or a held workout family). A walk key does not write the still key. Post-workout is not learnable.
+10. **Safety** — still-wrist extrema can page only if that channel is **fresh**.
+11. **Day tape** — after the tick, unique gated minutes go to Layer 1 `LBDayTape`. That is observations, not snapshot write.
 
 ## How each vital’s short-term baseline is calculated
 
@@ -55,7 +57,7 @@ UniTS, when loaded, emits \(\hat{x}\) and \(\sigma\) together from the same froz
 | Term | Meaning |
 |---|---|
 | **U** | Short-term first. A finite hat → \(U = 0.55\). A **shown** Layer 1 usual **replaces** that with that copy’s TRUST 0…1 (awake HR ≠ sleep RHR; copies never averaged). Caps 18 / 28 only when there is no hat and no shown usual. |
-| **C** | **HR / RHR / HRV:** fill of the current period (LiveTail HR coverage after a rest cut, else the 30-minute HR window). **Temp / breathing / SpO₂:** 1.0 while that vital still has a paired reading — **not** sliding HR coverage. |
+| **C** | **HR / RHR / HRV:** fill of the current period (LiveTail HR coverage after a rest cut, else the 30-minute HR window). **Temp / breathing / SpO₂:** fraction of **that** series’ tail minutes that are finite **and** fresh — not HR fill, and not 1.0 from a stale last pair. |
 | **E** | Evidence vs reconstruction: \(1 - \text{energy}/\tau\) in range; persist × magnitude if off. |
 
 **Sticky sparse TRUST.** Temp, breathing, and SpO₂ keep the last computed percent until **that vital’s last observation changes** (or it leaves the 30-minute window). Occupancy and HR fill must not walk the number between samples.
@@ -87,9 +89,9 @@ First card on **Baseline**: each vital in its own block — live value, predicte
 | `TimesFM3_Student.mlpackage` | Forecast cube until TimesFM **2.5-200m** Core ML convert lands (not TimesFM 3.0 — production-banned). |
 | Swift prior | Fallback if Core ML cannot load |
 
-TimesFM 3.0 official weights are licensed `timesfm-non-commercial-license-v1.0` and **cannot** go in a production app. Official TimesFM we ship is **2.5-200m** (Apache-2.0). Official UniTS is the mims-harvard pretrained ckpt, converted to the same 30×6 I/O. The Swift prior stays if that convert is not on disk.
+TimesFM 3.0 official weights are licensed `timesfm-non-commercial-license-v1.0` and **cannot** go in a production app. The official TimesFM this repo will convert is **2.5-200m** (Apache-2.0). Official UniTS is the mims-harvard pretrained ckpt, converted to the same 30×6 I/O. Until that convert replaces the packages, the phone loads the bundled student graphs (or the Swift prior). Version strings stay `units-ad-coreml-v2` / `timesfm3-student-v2` so isolation hashes stay honest.
 
-Live Watchdog only uses **30 minutes in** and **5 minutes out**, plus σ floors and a clipped `J`. On that strip, 2.5 vs 3.0 is a small hat difference, not a different product. The large jump is formula-student → official 2.5 / official UniTS. See `docs/FRWHOOP_WATCHDOG_IMPLEMENTATION_LOG_29_SEP_2026.md` (Official models).
+Live Watchdog only uses **30 minutes in** and **5 minutes out**, plus σ floors and a clipped `J`. On that strip, 2.5 vs 3.0 is a small hat difference. The large jump is formula-student → official 2.5 / official UniTS. Early (“looking ahead”) needs a real forecast cube (`forecastSource` official; inject is tests only). A hold cube cannot Early.
 
 | Piece | Path |
 |---|---|
@@ -98,5 +100,8 @@ Live Watchdog only uses **30 minutes in** and **5 minutes out**, plus σ floors 
 | Quality / notify | `WatchdogV2.swift` |
 | Events / band | `WatchdogEventGeometry.swift`, `WatchdogEventLabeler.swift`, `WatchdogPhaseUsual.swift` |
 | UI | `Strand/Screens/WatchdogView.swift` |
-| Live load | `Strand/Watchdog/WatchdogService.swift` |
+| Live load | `Strand/Watchdog/WatchdogService.swift` (active `deviceId` only) |
+| Background tick | `Strand/Watchdog/WatchdogBackgroundScheduler.swift` |
+| Day-tape ingest | `LBDayTape.swift` via `BaselineStore` |
+| Official convert (not yet replacing packages) | `Tools/units-watchdog/export_official_coreml.py` |
 | Pins | `Packages/StrandAnalytics/Baseline/units/` |

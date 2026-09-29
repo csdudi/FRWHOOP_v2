@@ -7,8 +7,8 @@ Watchdog never writes Layer 1. Layer 1 never scores the last 30 minutes. Neither
 | Engine | Question | Window | Usual / range | Code |
 |---|---|---|---|---|
 | **Charge / Effort / Rest** | How recovered / loaded is today? | Nights and sessions that already feed Today | Charge’s own fold | `Baselines.swift`, `RecoveryScorer.swift` — **not rewritten** |
-| **Layer 1 usuals** | What is usual for this person over days? | 7-day EWMA and 60-day gapped median, never mixed. Recorded sleep + steps + IMU energy only until daytime columns exist. | Night / day series after enough completed days | `LongitudinalBaseline.swift` |
-| **Watchdog (live)** | Did the last half-hour look like this person? | 30 one-minute bins, tick ~20 s | UniTS / Swift-prior reconstruction ± model σ | `Watchdog.swift` |
+| **Layer 1 usuals** | What is usual for this person over days? | 7-day EWMA and 60-day gapped median, never mixed. Sleep + steps from `DailyMetric`. IMU energy and daytime stubs from unique-minute tapes, never invented twins. | Night / day series after enough completed days | `LongitudinalBaseline.swift`, `LBDayTape.swift` |
+| **Watchdog (live)** | Did the last half-hour look like this person? | 30 one-minute bins, tick ~20 s (BG refresh may skip TimesFM) | UniTS / Swift-prior reconstruction ± model σ | `Watchdog.swift` |
 
 ## They stay separate
 
@@ -21,7 +21,7 @@ Watchdog never writes Layer 1. Layer 1 never scores the last 30 minutes. Neither
 | **When it can speak** | After enough nights (4 week / 14 long; 21 for steps, active minutes, IMU) | After a filled window with a model hat — nights are **not** required |
 | **Writes the other?** | No | No. Watchdog may *read* a shown Layer 1 usual as an optional prompt |
 
-The only allowed coupling: Watchdog **reads** a shown Layer 1 copy (awake HR ≠ sleep RHR) and a mature still-phase sidecar to *tighten* the reconstruction prompt. That does not turn the live corridor into the 7-day / 60-day band. If Layer 1 is still learning, Watchdog still reconstructs.
+The only allowed coupling: Watchdog **reads** a shown Layer 1 copy (awake HR ≠ sleep RHR) and a mature still-phase sidecar to *tighten* the reconstruction prompt. Day tapes Watchdog **feeds** after a tick are Layer 1 **observations**, not 7-day / 60-day snapshots — `evaluate` still does not write those. The live corridor is never the long band. If Layer 1 is still learning, Watchdog still reconstructs.
 
 How they work:
 

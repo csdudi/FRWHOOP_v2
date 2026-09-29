@@ -23,13 +23,13 @@ A skip-and-hold of the **center** (thin or missing night) does not present that 
 
 ## Series stay in their own context
 
-Sleep RHR is never mixed with awake-rest HR or with steps. Catalog is **18** series. Only columns that exist on `DailyMetric` (plus the IMU sidecar) produce observations. Stub series stay empty until a real column exists.
+Sleep RHR is never mixed with awake-rest HR or with steps. Catalog is **18** series. Sleep + steps still come from `DailyMetric`. IMU energy and the daytime / nadir / active-minute stubs come from **measured unique minutes** (`LBDayTape`, same rest / effort / sleep / freshness / 20 min recovery gates as live Watchdog). No rest+6 / ×0.88 twins. A series with no minutes that day stays empty.
 
-| Context | What trains today | What stays empty (no invented twin) |
+| Context | What trains today | What stays empty until measured minutes exist |
 |---|---|---|
-| Sleep | RHR, ln(RMSSD), wrist temp, breathing, SpO₂ mean | SpO₂ nadir (no column) |
-| Awake still / moving / all-day | — | HR, HRV, SpO₂ twins (no daytime columns) |
-| Waking load | Steps (recorded). Movement energy when the strap has IMU. | Active minutes (no column) |
+| Sleep | RHR, ln(RMSSD), wrist temp, breathing, SpO₂ mean (`DailyMetric`) | SpO₂ nadir until ≥ 3 unique fresh sleep percents |
+| Awake still / moving / all-day | Unique rest / effort / all-day minutes from the Watchdog window (HR, ln(RMSSD), SpO₂). Rest tape skips the 20 min post-workout window. | Any stub that has not met its minute floor (HR/HRV ≥ 8; SpO₂ ≥ 4) |
+| Waking load | Steps (recorded). Movement energy when the strap has IMU. Active minutes when occupancy or locomotion is high. | Active minutes until at least one unique minute |
 
 HRV math is on ln(RMSSD); the card shows ms. Each series has a floor so a tiny spread cannot turn a 1 bpm wiggle into a huge off call. IMU floor is 0.02 (family `imu`). Coverage with a **nil** coverage field is low-quality, not a free pass.
 
@@ -43,7 +43,7 @@ Establish N = 21. Coverage ≥ 60 unique minutes. Same 7-day / 60-day copies as 
 
 ## One night
 
-1. Build a daily observation from a **recorded** column or the IMU sidecar, or skip if the day is thin or confounded (felt ill, travel, extra med, alcohol, off-typical sleep/diet). An unmarked night is still clean — the log does not invent illness.
+1. Build a daily observation from a **recorded** column, the IMU sidecar, or a published `LBDayTape` mean, or skip if the day is thin or confounded (felt ill, travel, extra med, alcohol, off-typical sleep/diet). An unmarked night is still clean — the log does not invent illness. Watchdog’s live confounder bit uses **calendar today** (and yesterday only if a sleep session is still open). Layer 1 `asOf` is still the night being scored.
 2. Compare tonight to each copy (\(z\) vs center ± \(k \times\) spread, \(k = 2\)).
 3. A large residual can flag “off usual” without immediately moving the center.
 4. CUSUM tracks a slow shift across nights. Missing days skip the accumulator; they do not reset it.
@@ -66,12 +66,13 @@ The card never names a drug as the cause of a change.
 
 Watchdog **reads** a *shown* Layer 1 copy as an optional prompt (awake HR vs sleep RHR stay on separate copies; two copies are never averaged). A shown usual can raise live TRUST and supply a MAD floor for reconstruction σ. It does **not** gate the half-hour call: nights are not required before Watchdog can leave learning.
 
-Watchdog **never writes** Layer 1 snapshots. The live predicted range is UniTS / prior \(\hat{x} \pm \sigma\), not Layer 1 \(k \times\) MAD. See [WATCHDOG.md](WATCHDOG.md).
+Watchdog **never writes** Layer 1 7-day / 60-day snapshots. After a live tick it may append unique-minute **observations** to `LBDayTape`. The live predicted range is UniTS / prior \(\hat{x} \pm \sigma\), not Layer 1 \(k \times\) MAD. See [WATCHDOG.md](WATCHDOG.md).
 
 | Piece | Path |
 |---|---|
 | Engine | `Packages/StrandAnalytics/Sources/StrandAnalytics/LongitudinalBaseline.swift` |
 | IMU sidecar | `LongitudinalImuBaseline.swift`, `BaselineStore` |
+| Day tapes (stubs) | `LBDayTape.swift`, `BaselineStore.ingestWatchdogTape` |
 | Trial / freeze | `LongitudinalBaselineTrial.swift` |
 | App | `Strand/Data/BaselineStore.swift`, `BaselineMonitorView.swift`, `TreatmentMarkingView.swift` |
 | Pins | `LongitudinalBaselineBiometricLogicTests`, `LongitudinalBaselinePass27Tests`, catalog / audit suites |

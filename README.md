@@ -27,7 +27,7 @@ How they work in more detail: [`docs/baselines/`](docs/baselines/README.md).
 
 **Question:** what is usual for this person across days and nights?
 
-Every biometric that has enough nights gets **two copies**, never mixed:
+Every biometric that has enough nights gets **two copies**, never mixed. Sleep and steps come from recorded nights. Daytime stubs and IMU energy only train from **measured unique minutes**, never from a formula twin of sleep RHR:
 
 | Copy | Window | Role |
 |---|---|---|
@@ -44,9 +44,9 @@ Code: `LongitudinalBaseline.swift` · [full note](docs/baselines/LAYER1.md)
 
 **Question:** did the last half-hour look like this person?
 
-The top of the Baseline tab is the live card: heart rate, still HR, HRV, wrist temp, breathing, SpO₂. Each row is the live value against a **predicted range** for that half-hour. Empty minutes stay empty (a dash). Wrist-off is **unavailable**, not “recovered.”
+The top of the Baseline tab is the live card: heart rate, still HR, HRV, wrist temp, breathing, SpO₂. Each row is the live value against a **predicted range** for that half-hour (model \(\hat{x} \pm \sigma\), not the 7-day / 60-day band). Empty minutes stay empty (a dash). A stale vital is dropped before reconstruct. Wrist-off is **unavailable**, not “recovered.” Only the **active** strap fills the window.
 
-The live path can use a **shown** long-term usual as a prompt. It does **not** write Layer 1. **TRUST** on this card is how much to believe this stretch’s in-range / off call. Below 35% the card says it is still learning and will not call a reading off.
+The live path can use a **shown** long-term usual as a prompt. It does **not** write Layer 1 usuals. Unique gated minutes can feed Layer 1 **day tapes**. **TRUST** on this card is how much to believe this stretch’s in-range / off call. Below 35% the card says it is still learning and will not call a reading off. Looking-ahead (TimesFM) cannot page as severe. TimesFM 3.0 weights are not shipped.
 
 A phone notification is extreme only, and is not a diagnosis.
 
