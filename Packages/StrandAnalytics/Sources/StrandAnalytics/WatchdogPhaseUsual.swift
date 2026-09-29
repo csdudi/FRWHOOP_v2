@@ -190,6 +190,8 @@ public struct WatchdogBandState: Equatable, Sendable, Codable {
     public var ready: Bool
     public var scale: [Double]
     public var lastUnix: Int
+    /// Present updates per channel. Missing vitals do not train q[k] toward 0.
+    public var nPresent: [Int]
 
     public static let empty = WatchdogBandState()
 
@@ -197,13 +199,31 @@ public struct WatchdogBandState: Equatable, Sendable, Codable {
                 anchor: [Double] = Array(repeating: 1, count: 6),
                 n: Int = 0, ready: Bool = false,
                 scale: [Double] = Array(repeating: 1, count: 6),
-                lastUnix: Int = 0) {
+                lastUnix: Int = 0,
+                nPresent: [Int] = Array(repeating: 0, count: 6)) {
         self.q = q
         self.anchor = anchor
         self.n = n
         self.ready = ready
         self.scale = scale
         self.lastUnix = lastUnix
+        self.nPresent = nPresent
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case q, anchor, n, ready, scale, lastUnix, nPresent
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        q = try c.decodeIfPresent([Double].self, forKey: .q) ?? Array(repeating: 0, count: 6)
+        anchor = try c.decodeIfPresent([Double].self, forKey: .anchor) ?? Array(repeating: 1, count: 6)
+        n = try c.decodeIfPresent(Int.self, forKey: .n) ?? 0
+        ready = try c.decodeIfPresent(Bool.self, forKey: .ready) ?? false
+        scale = try c.decodeIfPresent([Double].self, forKey: .scale) ?? Array(repeating: 1, count: 6)
+        lastUnix = try c.decodeIfPresent(Int.self, forKey: .lastUnix) ?? 0
+        nPresent = try c.decodeIfPresent([Int].self, forKey: .nPresent) ?? Array(repeating: 0, count: 6)
+        if nPresent.count < 6 { nPresent += Array(repeating: 0, count: 6 - nPresent.count) }
     }
 }
 
@@ -234,8 +254,7 @@ public enum WatchdogBand: Sendable {
     public static func learnable(_ label: WatchdogEventLabel) -> Bool {
         switch label {
         case .normalSleep, .normalStillAwake,
-             .workoutWalk, .workoutRun, .workoutCycle, .workoutLift,
-             .postWorkout:
+             .workoutWalk, .workoutRun, .workoutCycle, .workoutLift:
             return true
         default:
             return false
@@ -250,8 +269,11 @@ public enum WatchdogBand: Sendable {
                               q: inout [Double], anchor: inout [Double],
                               n: inout Int, initialized: inout Bool) -> [Double] {
         var scale = Array(repeating: 1.0, count: 6)
+        var nPresent = Array(repeating: 0, count: 6)
+        var last = 0
         return update(absResidual: absResidual, eligible: eligible, q: &q, anchor: &anchor,
-                      n: &n, initialized: &initialized, scale: &scale)
+                      n: &n, initialized: &initialized, scale: &scale,
+                      nowUnix: 0, lastUnix: &last, nPresent: &nPresent)
     }
 
     public static func update(absResidual: [Double], eligible: Bool,
@@ -259,20 +281,43 @@ public enum WatchdogBand: Sendable {
                               n: inout Int, initialized: inout Bool,
                               scale: inout [Double],
                               nowUnix: Int = 0, lastUnix: inout Int) -> [Double] {
+        var nPresent = Array(repeating: 0, count: 6)
+        return update(absResidual: absResidual, eligible: eligible, q: &q, anchor: &anchor,
+                      n: &n, initialized: &initialized, scale: &scale,
+                      nowUnix: nowUnix, lastUnix: &lastUnix, nPresent: &nPresent)
+    }
+
+    public static func update(absResidual: [Double], eligible: Bool,
+                              q: inout [Double], anchor: inout [Double],
+                              n: inout Int, initialized: inout Bool,
+                              scale: inout [Double],
+                              nowUnix: Int = 0, lastUnix: inout Int,
+                              present: [Bool]? = nil,
+                              nPresent: inout [Int]) -> [Double] {
         if q.count < 6 { q = Array(repeating: 0, count: 6) }
         if anchor.count < 6 { anchor = Array(repeating: 1, count: 6) }
         if scale.count < 6 { scale = Array(repeating: 1, count: 6) }
+        if nPresent.count < 6 { nPresent = Array(repeating: 0, count: 6) }
         guard eligible, absResidual.count >= 6 else { return scale }
         if absResidual.contains(where: { $0 >= residualCap }) { return scale }
         if nowUnix > 0, !shouldCountMinute(nowUnix: nowUnix, lastUnix: lastUnix) { return scale }
+        let mask = present ?? Array(repeating: true, count: 6)
+        guard mask.contains(true) else { return scale }
         n += 1
         if nowUnix > 0 { lastUnix = nowUnix }
         let a = alpha(nElig: n)
         for k in 0..<6 {
+            guard mask[k] else { continue }
             let x = min(max(absResidual[k], 0), learnCap)
-            q[k] = (1 - a) * q[k] + a * x
+            if nPresent[k] == 0 {
+                q[k] = x
+            } else {
+                q[k] = (1 - a) * q[k] + a * x
+            }
+            nPresent[k] += 1
         }
-        if !initialized && n >= firstMinutes {
+        let matured = (0..<6).contains { nPresent[$0] >= firstMinutes }
+        if !initialized && matured {
             for k in 0..<6 {
                 anchor[k] = max(q[k], qFloor)
                 scale[k] = 1
@@ -282,6 +327,7 @@ public enum WatchdogBand: Sendable {
         }
         guard initialized else { return scale }
         for k in 0..<6 {
+            guard nPresent[k] >= firstMinutes else { continue }
             let desired = min(clampHi, max(clampLo, q[k] / max(anchor[k], qFloor)))
             let prev = scale[k].isFinite && scale[k] > 0 ? scale[k] : 1
             let delta = min(stepMax, max(-stepMax, desired - prev))
@@ -295,15 +341,18 @@ public enum WatchdogBand: Sendable {
                               n: inout Int, initialized: inout Bool,
                               scale: inout [Double]) -> [Double] {
         var last = 0
+        var nPresent = Array(repeating: 0, count: 6)
         return update(absResidual: absResidual, eligible: eligible, q: &q, anchor: &anchor,
-                      n: &n, initialized: &initialized, scale: &scale, nowUnix: 0, lastUnix: &last)
+                      n: &n, initialized: &initialized, scale: &scale,
+                      nowUnix: 0, lastUnix: &last, nPresent: &nPresent)
     }
 
     public static func update(_ state: inout WatchdogBandState, absResidual: [Double],
-                              eligible: Bool, nowUnix: Int) -> [Double] {
+                              eligible: Bool, nowUnix: Int, present: [Bool]? = nil) -> [Double] {
         update(absResidual: absResidual, eligible: eligible, q: &state.q, anchor: &state.anchor,
                n: &state.n, initialized: &state.ready, scale: &state.scale,
-               nowUnix: nowUnix, lastUnix: &state.lastUnix)
+               nowUnix: nowUnix, lastUnix: &state.lastUnix, present: present,
+               nPresent: &state.nPresent)
     }
 
     public static func apply(_ scales: [Double], to values: [Double]) -> [Double] {

@@ -62,7 +62,7 @@ final class WatchdogV28LiveTapeTests: XCTestCase {
                                             freshnessSeconds: 60)
         XCTAssertFalse(fresh)
         XCTAssertTrue(WatchdogLiveTape.wristOff(deviceOff: true, freshLiveHR: fresh))
-        XCTAssertFalse(WatchdogLiveTape.wristOff(deviceOff: true, freshLiveHR: true))
+        XCTAssertTrue(WatchdogLiveTape.wristOff(deviceOff: true, freshLiveHR: true))
         XCTAssertFalse(WatchdogLiveTape.wristOff(deviceOff: false, freshLiveHR: false))
     }
 

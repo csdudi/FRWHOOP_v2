@@ -60,6 +60,8 @@ final class BaselineStore: ObservableObject {
     @Published var imuByDay: [String: LBDailyObservation] = [:]
     private var imuAccByDay: [String: LBImuDayAccumulator] = [:]
     private var imuLastPersistUnix: Int = 0
+    private var dayTapeByDay: [String: LBDayTape] = [:]
+    private var tapeLastPersistUnix: Int = 0
     @Published var showStartForm = false
     @Published var showDoseForm = false
     @Published var showEndForm = false
@@ -79,6 +81,7 @@ final class BaselineStore: ObservableObject {
     private let confoundersKey = "noop.baseline.confounders.v1"
     private let dayLogsKey = "noop.baseline.daylog.v1"
     private let imuKey = "noop.baseline.imu.v1"
+    private let tapeKey = "noop.baseline.daytape.v1"
     private let dismissedPromptKey = "noop.baseline.dismissedPrompt.v1"
 
     init(defaults: UserDefaults = .standard, asOf: String? = nil, resetCourse: Bool = false) {
@@ -94,6 +97,7 @@ final class BaselineStore: ObservableObject {
             defaults.removeObject(forKey: confoundersKey)
             defaults.removeObject(forKey: dayLogsKey)
             defaults.removeObject(forKey: imuKey)
+            defaults.removeObject(forKey: tapeKey)
             defaults.removeObject(forKey: dismissedPromptKey)
             for series in LBSeries.allCases {
                 defaults.removeObject(forKey: freezeKeyPrefix + series.rawValue)
@@ -103,12 +107,14 @@ final class BaselineStore: ObservableObject {
             self.dayLogsByDay = [:]
             self.imuByDay = [:]
             self.imuAccByDay = [:]
+            self.dayTapeByDay = [:]
         } else {
             self.events = Self.loadEvents(defaults: defaults)
             self.confoundersByDay = Self.loadConfounders(defaults: defaults)
             self.dayLogsByDay = Self.loadDayLogs(defaults: defaults)
             self.imuAccByDay = Self.loadImu(defaults: defaults)
             self.imuByDay = Dictionary(uniqueKeysWithValues: self.imuAccByDay.map { ($0.key, $0.value.observation) })
+            self.dayTapeByDay = Self.loadDayTape(defaults: defaults)
             self.dismissedPromptDay = defaults.string(forKey: dismissedPromptKey)
         }
     }
@@ -177,7 +183,22 @@ final class BaselineStore: ObservableObject {
         if series == .wakingImuEnergy {
             return imuAccByDay.values.map(\.observation).sorted { $0.day < $1.day }
         }
-        return LongitudinalBaseline.observations(from: days, series: series)
+        if series.hasDailyMetricColumn {
+            return LongitudinalBaseline.observations(from: days, series: series)
+        }
+        return dayTapeByDay.values.compactMap { $0.observation(series: series) }.sorted { $0.day < $1.day }
+    }
+
+    /// Unique-minute stub series from the same window Watchdog scored. Does not write Layer 1 snapshots.
+    func ingestWatchdogTape(window: WatchdogWindow, nowUnix: Int, lastWorkoutEndUnix: Int) {
+        let day = Self.dayKey(Date(timeIntervalSince1970: TimeInterval(nowUnix)))
+        var tape = dayTapeByDay[day] ?? LBDayTape(day: day)
+        guard tape.ingest(window: window, nowUnix: nowUnix, lastWorkoutEndUnix: lastWorkoutEndUnix) else { return }
+        dayTapeByDay[day] = tape
+        if nowUnix - tapeLastPersistUnix >= 60 {
+            persistDayTape()
+            tapeLastPersistUnix = nowUnix
+        }
     }
 
     /// Incremental IMU usual. New samples only; does not write Charge or other Layer 1 series.
@@ -802,9 +823,21 @@ final class BaselineStore: ObservableObject {
         }
     }
 
+    private func persistDayTape() {
+        if let data = try? JSONEncoder().encode(Array(dayTapeByDay.values)) {
+            defaults.set(data, forKey: tapeKey)
+        }
+    }
+
     private static func loadImu(defaults: UserDefaults) -> [String: LBImuDayAccumulator] {
         guard let data = defaults.data(forKey: "noop.baseline.imu.v1"),
               let rows = try? JSONDecoder().decode([LBImuDayAccumulator].self, from: data) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: rows.map { ($0.day, $0) })
+    }
+
+    private static func loadDayTape(defaults: UserDefaults) -> [String: LBDayTape] {
+        guard let data = defaults.data(forKey: "noop.baseline.daytape.v1"),
+              let rows = try? JSONDecoder().decode([LBDayTape].self, from: data) else { return [:] }
         return Dictionary(uniqueKeysWithValues: rows.map { ($0.day, $0) })
     }
 

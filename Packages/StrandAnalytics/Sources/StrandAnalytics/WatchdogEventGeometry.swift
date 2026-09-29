@@ -70,7 +70,7 @@ public enum WatchdogEventGeometry: Sendable {
             let row = window.activityFeatures.last
             if let row, row.count > 14, row[14] >= 0.5 { return .run }
             if let row, row.count > 13, row[13] >= 0.5 { return .walk }
-            return logitCls == .unknown ? .walk : logitCls
+            return logitCls
         }
     }
 

@@ -26,8 +26,9 @@ public enum WatchdogLiveTape: Sendable {
         return now - t <= freshnessSeconds
     }
 
-    /// Device wrist-off wins unless a *fresh* live packet is still arriving.
+    /// Device wrist-off wins. A leftover 2A37 packet clock cannot clear WRIST_OFF.
     public static func wristOff(deviceOff: Bool, freshLiveHR: Bool) -> Bool {
-        deviceOff && !freshLiveHR
+        _ = freshLiveHR
+        return deviceOff
     }
 }

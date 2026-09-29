@@ -88,6 +88,10 @@ struct StrandiOSApp: App {
             await CloudPushWorker.runOnce(db: writer, trigger: "background")
             await model?.syncEngine.drain(reason: .backgroundTask)
         }
+        WatchdogBackgroundScheduler.register { [weak model] in
+            await model?.watchdog.tick(skipForecast: true)
+        }
+        WatchdogBackgroundScheduler.scheduleIfNeeded()
         SyncMaintenanceBackgroundScheduler.register { [weak model] in
             await model?.syncEngine.drain(reason: .backgroundTask)
         }

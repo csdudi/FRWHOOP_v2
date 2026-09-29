@@ -113,6 +113,32 @@ public enum WatchdogQuality: Sendable {
         family == .whoop5 ? WatchdogConfig.whoop5FreshnessSeconds : WatchdogConfig.whoop4FreshnessSeconds
     }
 
+    /// HR/RHR use the family packet clock. Sparse vitals use their own cadence.
+    public static func channelFreshnessSeconds(channel: Int, family: DeviceFamily) -> Int {
+        switch channel {
+        case 0, 1: return freshnessLimit(family)
+        case 2: return 5 * 60
+        case 3: return 8 * 60
+        case 4, 5: return 6 * 60
+        default: return freshnessLimit(family)
+        }
+    }
+
+    public static func lastFiniteMinuteUnix(_ series: [Double?], startUnix: Int) -> Int? {
+        for i in stride(from: series.count - 1, through: 0, by: -1) {
+            if series[i] != nil {
+                return startUnix + i * WatchdogConfig.gridSeconds
+            }
+        }
+        return nil
+    }
+
+    public static func channelFresh(_ series: [Double?], startUnix: Int, nowUnix: Int,
+                                   channel: Int, family: DeviceFamily) -> Bool {
+        guard let t = lastFiniteMinuteUnix(series, startUnix: startUnix) else { return false }
+        return nowUnix - t <= channelFreshnessSeconds(channel: channel, family: family)
+    }
+
     public static func gate(_ window: WatchdogWindow, tail: WatchdogLiveTail? = nil) -> WatchdogUnavailable? {
         if bucketCoverage(window) + 1e-9 < WatchdogConfig.minCoverage { return .coverage }
         if window.newestAgeSeconds > freshnessLimit(window.family) { return .stale }
@@ -145,13 +171,13 @@ public enum WatchdogAdaptive: Sendable {
         var out = residual
         let live = tail ?? WatchdogLiveTail.resolve(window)
         let artifact = WatchdogActivityRuntime.isArtifact(window.activityLogits, from: live.startIndex)
-        func absr(_ p: (obs: Double, hat: Double)?) -> Double {
-            guard let p else { return 0 }
+        func absr(_ p: (obs: Double, hat: Double)?) -> Double? {
+            guard let p else { return nil }
             return abs(p.obs - p.hat)
         }
         func lastZ(_ p: (obs: Double, hat: Double)?, scale: [Double]) -> Double {
-            guard let p else { return 0 }
-            return absr(p) / max(scale.last ?? 1, 0.01)
+            guard let a = absr(p) else { return 0 }
+            return a / max(scale.last ?? 1, 0.01)
         }
         let lastBandZ = max(
             lastZ(lastHR, scale: residual.scaleHR),
@@ -170,12 +196,16 @@ public enum WatchdogAdaptive: Sendable {
         }
         if tailJoint < WatchdogCalibration.tNote || lastBandZ < 1.0 {
             let a = quietEma
-            carry.quietAbsHR = (1 - a) * carry.quietAbsHR + a * absr(lastHR)
-            carry.quietAbsRHR = (1 - a) * carry.quietAbsRHR + a * absr(lastRHR)
-            carry.quietAbsHRV = (1 - a) * carry.quietAbsHRV + a * absr(lastHRV)
-            carry.quietAbsTemp = (1 - a) * carry.quietAbsTemp + a * absr(lastTemp)
-            carry.quietAbsResp = (1 - a) * carry.quietAbsResp + a * absr(lastResp)
-            carry.quietAbsSpO2 = (1 - a) * carry.quietAbsSpO2 + a * absr(lastSpO2)
+            func mix(_ held: inout Double, _ pair: (obs: Double, hat: Double)?) {
+                guard let x = absr(pair) else { return }
+                held = (1 - a) * held + a * x
+            }
+            mix(&carry.quietAbsHR, lastHR)
+            mix(&carry.quietAbsRHR, lastRHR)
+            mix(&carry.quietAbsHRV, lastHRV)
+            mix(&carry.quietAbsTemp, lastTemp)
+            mix(&carry.quietAbsResp, lastResp)
+            mix(&carry.quietAbsSpO2, lastSpO2)
             carry.quietN += 1
         }
         let art = artifact ? artifactGain : 1.0
@@ -309,10 +339,12 @@ public struct WatchdogForecastStep: Equatable, Sendable {
     public var nextSpO2: [Double]
     public var ranStudent: Bool
     public var studentOk: Bool
+    /// official | hold | inject
+    public var source: String
 
     public static let empty = WatchdogForecastStep(
         energy: 0, nextHR: [], nextHRV: [], nextTemp: [], nextResp: [],
-        nextRHR: [], nextSpO2: [], ranStudent: false, studentOk: false)
+        nextRHR: [], nextSpO2: [], ranStudent: false, studentOk: false, source: "hold")
 
     public var cube: [[Double]] {
         [nextHR, nextRHR, nextHRV, nextTemp, nextResp, nextSpO2]
@@ -343,7 +375,8 @@ public struct WatchdogForecastRuntime: Sendable {
                      prompt: UniTSPrompt = UniTSPrompt(),
                      carry: WatchdogCarry,
                      nowUnix: Int = 0,
-                     tail: WatchdogLiveTail? = nil) -> WatchdogForecastStep {
+                     tail: WatchdogLiveTail? = nil,
+                     skipForecast: Bool = false) -> WatchdogForecastStep {
         let h = WatchdogCalibration.forecastHorizon
         let from = (tail ?? WatchdogLiveTail.resolve(window)).startIndex
         func lastObs(_ obs: [Double?], _ scale: [Double], from start: Int) -> (obs: [Double], sig: [Double]) {
@@ -395,16 +428,23 @@ public struct WatchdogForecastRuntime: Sendable {
             e = max(e, energy(obs: spo2.obs, pred: Array(carry.lastForecastSpO2.prefix(spo2.obs.count)), sig: spo2.sig))
         }
 
-        let skipStudent = nowUnix > 0 && carry.forecastStudentOk
+        let skipStudent = skipForecast || (nowUnix > 0 && carry.forecastStudentOk
             && carry.lastForecastUnix > 0
             && (nowUnix - carry.lastForecastUnix) < 60
             && Self.completeCube(carry.lastForecastHR, carry.lastForecastRHR, carry.lastForecastHRV,
-                                 carry.lastForecastTemp, carry.lastForecastResp, carry.lastForecastSpO2)
+                                 carry.lastForecastTemp, carry.lastForecastResp, carry.lastForecastSpO2))
         if skipStudent {
+            let src = skipForecast
+                ? (carry.lastForecastSource.isEmpty ? "hold" : carry.lastForecastSource)
+                : (carry.lastForecastSource.isEmpty ? "official" : carry.lastForecastSource)
             return WatchdogForecastStep(energy: e, nextHR: carry.lastForecastHR, nextHRV: carry.lastForecastHRV,
                                         nextTemp: carry.lastForecastTemp, nextResp: carry.lastForecastResp,
                                         nextRHR: carry.lastForecastRHR, nextSpO2: carry.lastForecastSpO2,
-                                        ranStudent: false, studentOk: true)
+                                        ranStudent: false, studentOk: carry.forecastStudentOk
+                                            && Self.completeCube(carry.lastForecastHR, carry.lastForecastRHR,
+                                                                 carry.lastForecastHRV, carry.lastForecastTemp,
+                                                                 carry.lastForecastResp, carry.lastForecastSpO2),
+                                        source: src)
         }
 
         func hold(_ hat: [Double?]) -> [Double] {
@@ -441,17 +481,20 @@ public struct WatchdogForecastRuntime: Sendable {
             bases[5] ?? WatchdogPopulationPriors.spo2
         ]
         let predicted: [[Double]]?
+        var predictedSource = "official"
         if let override = Self.testPredict {
             predicted = override
+            predictedSource = "inject"
         } else {
             predicted = TimesFMStudentSession.shared.predict(history: history, prompt: promptVec, occupancy: occ)
+            predictedSource = "official"
         }
         if let forecast = predicted,
            Self.completeCube(forecast) {
             return WatchdogForecastStep(energy: e, nextHR: forecast[0], nextHRV: forecast[2],
                                         nextTemp: forecast[3], nextResp: forecast[4],
                                         nextRHR: forecast[1], nextSpO2: forecast[5],
-                                        ranStudent: true, studentOk: true)
+                                        ranStudent: true, studentOk: true, source: predictedSource)
         }
         return WatchdogForecastStep(energy: e, nextHR: hold(residual.reconstructedHR),
                                     nextHRV: hold(residual.reconstructedHRV),
@@ -459,7 +502,7 @@ public struct WatchdogForecastRuntime: Sendable {
                                     nextResp: hold(residual.reconstructedResp),
                                     nextRHR: hold(residual.reconstructedRHR),
                                     nextSpO2: hold(residual.reconstructedSpO2),
-                                    ranStudent: false, studentOk: false)
+                                    ranStudent: false, studentOk: false, source: "hold")
     }
 
     public static func completeCube(_ planes: [[Double]]) -> Bool {
@@ -545,7 +588,9 @@ public struct WatchdogForecastRuntime: Sendable {
     }
 
     public static func wearerEarly(pathJ: Double, allowed: Bool, severity: WatchdogSeverity,
-                                   trustPct: Int, persistTicks: Int) -> Bool {
+                                   trustPct: Int, persistTicks: Int,
+                                   forecastSource: String = "official") -> Bool {
+        guard forecastSource == "official" || forecastSource == "inject" else { return false }
         guard allowed, severity != .severe, severity != .active else { return false }
         guard trustPct >= earlyTrustFloor else { return false }
         return pathJ >= WatchdogCalibration.tNote && persistTicks >= WatchdogCalibration.persistTicks

@@ -30,14 +30,13 @@ final class WatchdogService {
         }
     }
 
-    func tick(inject: Watchdog.WatchdogInject? = nil) async {
+    func tick(inject: Watchdog.WatchdogInject? = nil, skipForecast: Bool = false) async {
         guard let model else { return }
         captureLive(model)
         let now = Int(Date().timeIntervalSince1970)
         let days = model.repo.days
         let promptEvals = model.baseline.watchdogPromptEvaluations(days: days)
         let prompt = UniTSPrompt.from(evaluations: promptEvals)
-        let log = model.baseline.dayLogsByDay[model.baseline.asOf]
         let window: Result<WatchdogWindow, WatchdogUnavailable>
         if inject == nil {
             window = await loadWindow(model: model, now: now)
@@ -49,6 +48,13 @@ final class WatchdogService {
             WatchdogSleepInterval(startUnix: $0.effectiveStartTs, endUnix: $0.endTs)
         }
         let sleepOpen = sleepIntervals.contains { $0.contains(now) }
+        let todayLog = model.baseline.calendarTodayLog
+        let yesterdayLog = model.baseline.dayLogsByDay[BaselineStore.yesterdayKey()]
+        let log: LBDayLog? = {
+            if todayLog?.confoundsUsual == true { return todayLog }
+            if sleepOpen, yesterdayLog?.confoundsUsual == true { return yesterdayLog }
+            return todayLog ?? yesterdayLog
+        }()
         let result = Watchdog.evaluate(window: window,
                                        prompt: prompt,
                                        evaluations: promptEvals,
@@ -58,11 +64,14 @@ final class WatchdogService {
                                        previous: carry,
                                        inject: inject,
                                        sleepSessionOpen: sleepOpen,
-                                       sleepIntervals: sleepIntervals)
+                                       sleepIntervals: sleepIntervals,
+                                       skipForecast: skipForecast)
         carry = result.carry
         persistCarry()
         if case .success(let built) = window {
             model.baseline.ingestImu(samples: built.imu, nowUnix: now)
+            model.baseline.ingestWatchdogTape(window: built, nowUnix: now,
+                                              lastWorkoutEndUnix: carry.lastWorkoutEndUnix)
         }
         model.baseline.applyWatchdog(result)
         if result.shouldNotify {
@@ -146,7 +155,7 @@ final class WatchdogService {
         let temps = tempsRaw.map {
             WatchdogScalarSample(ts: $0.ts, value: skinTempCelsius(raw: $0.raw, family: family))
         }
-        let gravity = await model.repo.gravitySamplesUnion(from: from, to: now, limit: limit)
+        let gravity = (try? await store.gravitySamples(deviceId: model.deviceId, from: from, to: now, limit: limit)) ?? []
         let imu = gravity.map {
             WatchdogIMUSample(ts: $0.ts, x: $0.x, y: $0.y, z: $0.z, dynAccel: $0.dynAccel)
         }

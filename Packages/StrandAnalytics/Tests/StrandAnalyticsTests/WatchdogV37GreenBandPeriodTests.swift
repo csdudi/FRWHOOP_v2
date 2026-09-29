@@ -108,7 +108,7 @@ final class WatchdogV37GreenBandPeriodTests: XCTestCase {
         let r = still(now: now, previous: carry)
         XCTAssertEqual(r.eventLabel, WatchdogEventLabel.postWorkout.rawValue, r.eventLabel)
         let n = r.carry.bandByKey.filter { $0.key.contains("post_workout") }.values.map(\.n).max() ?? 0
-        XCTAssertGreaterThan(n, 0)
+        XCTAssertEqual(n, 0, "recovery must not train the green band")
         let stillN = r.carry.bandByKey.filter { $0.key.contains("still") && !$0.key.contains("post") }
             .values.map(\.n).max() ?? 0
         XCTAssertEqual(stillN, 0)
@@ -190,18 +190,19 @@ final class WatchdogV37GreenBandPeriodTests: XCTestCase {
         var ready = false
         var scale = Array(repeating: 1.0, count: 6)
         var last = 0
+        var nPresent = Array(repeating: 0, count: 6)
         for i in 0..<14 {
             _ = WatchdogBand.update(absResidual: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25],
                                     eligible: true, q: &q, anchor: &anchor, n: &n,
                                     initialized: &ready, scale: &scale,
-                                    nowUnix: 1_000 + i * 60, lastUnix: &last)
+                                    nowUnix: 1_000 + i * 60, lastUnix: &last, nPresent: &nPresent)
         }
         XCTAssertTrue(ready)
         for i in 0..<200 {
             _ = WatchdogBand.update(absResidual: [1.1, 1.1, 1.1, 1.1, 1.1, 1.1],
                                     eligible: true, q: &q, anchor: &anchor, n: &n,
                                     initialized: &ready, scale: &scale,
-                                    nowUnix: 2_000 + i * 60, lastUnix: &last)
+                                    nowUnix: 2_000 + i * 60, lastUnix: &last, nPresent: &nPresent)
         }
         XCTAssertLessThanOrEqual(scale[0], WatchdogBand.clampHi)
         XCTAssertGreaterThanOrEqual(scale[0], WatchdogBand.clampLo)

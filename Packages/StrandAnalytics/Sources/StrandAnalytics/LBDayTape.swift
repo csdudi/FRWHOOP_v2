@@ -1,0 +1,147 @@
+import Foundation
+
+/// Unique-minute mean for one civil-day series. Missing is never stored as 0.
+public struct LBMinuteBucket: Equatable, Sendable, Codable {
+    public var sum: Double = 0
+    public var n: Int = 0
+    public var lastMinuteUnix: Int = 0
+
+    public var mean: Double? { n > 0 ? sum / Double(n) : nil }
+
+    @discardableResult
+    public mutating func addUnique(value: Double, minuteUnix: Int) -> Bool {
+        guard value.isFinite, minuteUnix > lastMinuteUnix else { return false }
+        sum += value
+        n += 1
+        lastMinuteUnix = minuteUnix
+        return true
+    }
+}
+
+/// Civil-day Watchdog tape for stub Layer 1 series. `evaluate` never writes 7-day / 60-day snapshots.
+public struct LBDayTape: Equatable, Sendable, Codable {
+    public var day: String
+    public var restHR = LBMinuteBucket()
+    public var restHRV = LBMinuteBucket()
+    public var restSpO2 = LBMinuteBucket()
+    public var effortHR = LBMinuteBucket()
+    public var effortHRV = LBMinuteBucket()
+    public var effortSpO2 = LBMinuteBucket()
+    public var allHR = LBMinuteBucket()
+    public var allHRV = LBMinuteBucket()
+    public var allSpO2 = LBMinuteBucket()
+    public var sleepSpO2Min: Double?
+    public var sleepSpO2N: Int = 0
+    public var sleepSpO2LastMinute: Int = 0
+    public var activeMinutes: Int = 0
+    public var lastActiveMinute: Int = 0
+
+    public init(day: String) { self.day = day }
+
+    public mutating func ingest(window: WatchdogWindow, nowUnix: Int,
+                                lastWorkoutEndUnix: Int = 0) -> Bool {
+        let tail = WatchdogLiveTail.resolve(window)
+        let recovering = tail.postWorkout(carryEndUnix: lastWorkoutEndUnix, nowUnix: nowUnix)
+        let features = window.resolvedActivityFeatures()
+        let lastRow = features.last ?? []
+        let sleepNow = WatchdogActivityFeatures.sleepBit(lastRow) == 1
+        let occ = lastRow.isEmpty ? 0 : WatchdogActivityFeatures.priorOccupancy(lastRow)
+        let loco = lastRow.isEmpty ? 0 : WatchdogActivityFeatures.stepLocomotion(lastRow)
+        var changed = false
+
+        func lastFresh(_ series: [Double?], channel: Int) -> (Double, Int)? {
+            guard WatchdogQuality.channelFresh(series, startUnix: window.startUnix, nowUnix: nowUnix,
+                                               channel: channel, family: window.family),
+                  let t = WatchdogQuality.lastFiniteMinuteUnix(series, startUnix: window.startUnix)
+            else { return nil }
+            let i = (t - window.startUnix) / WatchdogConfig.gridSeconds
+            guard i >= 0, i < series.count, let v = series[i] else { return nil }
+            return (v, t)
+        }
+
+        if let (v, t) = lastFresh(window.hr, channel: 0) {
+            changed = allHR.addUnique(value: v, minuteUnix: t) || changed
+            if sleepNow {
+                // Sleep HR stays on DailyMetric nights; tape does not invent sleep RHR.
+            } else if tail.period == .effort {
+                changed = effortHR.addUnique(value: v, minuteUnix: t) || changed
+            } else if tail.stillNow, !recovering {
+                changed = restHR.addUnique(value: v, minuteUnix: t) || changed
+            }
+        }
+        if let (v, t) = lastFresh(window.hrv, channel: 2) {
+            let ln = log(max(v, 1))
+            changed = allHRV.addUnique(value: ln, minuteUnix: t) || changed
+            if !sleepNow, tail.period == .effort {
+                changed = effortHRV.addUnique(value: ln, minuteUnix: t) || changed
+            } else if !sleepNow, tail.stillNow, !recovering {
+                changed = restHRV.addUnique(value: ln, minuteUnix: t) || changed
+            }
+        }
+        if let (v, t) = lastFresh(window.spo2, channel: 5) {
+            changed = allSpO2.addUnique(value: v, minuteUnix: t) || changed
+            if sleepNow, t > sleepSpO2LastMinute {
+                sleepSpO2Min = sleepSpO2Min.map { min($0, v) } ?? v
+                sleepSpO2N += 1
+                sleepSpO2LastMinute = t
+                changed = true
+            } else if !sleepNow, tail.period == .effort {
+                changed = effortSpO2.addUnique(value: v, minuteUnix: t) || changed
+            } else if !sleepNow, tail.stillNow, !recovering {
+                changed = restSpO2.addUnique(value: v, minuteUnix: t) || changed
+            }
+        }
+        if !sleepNow, (occ >= 0.15 || loco >= 0.5), nowUnix > lastActiveMinute {
+            let minute = nowUnix - (nowUnix % 60)
+            if minute > lastActiveMinute {
+                activeMinutes += 1
+                lastActiveMinute = minute
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    public func observation(series: LBSeries) -> LBDailyObservation? {
+        func publish(_ bucket: LBMinuteBucket, floor: Int, native: Double?) -> LBDailyObservation? {
+            guard let native, bucket.n >= floor else { return nil }
+            var o = LongitudinalBaseline.observation(
+                day: day, native: native, streamPresent: true, sleepHrOnly: false, series: series)
+            o.coverage = Double(bucket.n)
+            return LongitudinalBaseline.applyCoverageGate(o, series: series)
+        }
+        switch series {
+        case .awakeRestHR:
+            return publish(restHR, floor: 8, native: restHR.mean)
+        case .awakeRestHRVLn:
+            return publish(restHRV, floor: 8, native: restHRV.mean)
+        case .awakeRestSpO2Mean:
+            return publish(restSpO2, floor: 4, native: restSpO2.mean)
+        case .awakeActiveHR:
+            return publish(effortHR, floor: 8, native: effortHR.mean)
+        case .awakeActiveHRVLn:
+            return publish(effortHRV, floor: 8, native: effortHRV.mean)
+        case .awakeActiveSpO2Mean:
+            return publish(effortSpO2, floor: 4, native: effortSpO2.mean)
+        case .continuousHR:
+            return publish(allHR, floor: 8, native: allHR.mean)
+        case .continuousHRVLn:
+            return publish(allHRV, floor: 8, native: allHRV.mean)
+        case .continuousSpO2Mean:
+            return publish(allSpO2, floor: 4, native: allSpO2.mean)
+        case .sleepSpO2Nadir:
+            guard let nadir = sleepSpO2Min, sleepSpO2N >= 3 else { return nil }
+            var o = LongitudinalBaseline.observation(
+                day: day, native: nadir, streamPresent: true, sleepHrOnly: false, series: series)
+            o.coverage = Double(sleepSpO2N)
+            return LongitudinalBaseline.applyCoverageGate(o, series: series)
+        case .wakingActiveMin:
+            guard activeMinutes >= 1 else { return nil }
+            return LongitudinalBaseline.observation(
+                day: day, native: Double(activeMinutes), streamPresent: true,
+                sleepHrOnly: false, series: series)
+        default:
+            return nil
+        }
+    }
+}

@@ -327,13 +327,9 @@ public struct UniTSRuntime: Sendable {
     static func packObserved(_ window: WatchdogWindow, bases: [Double?]) -> [[Double]] {
         func fill(_ xs: [Double?], _ base: Double?) -> [Double] {
             let seed = base ?? 0
-            var last = seed
             return (0..<WatchdogConfig.seqLen).map { i in
-                if i < xs.count, let v = xs[i] {
-                    last = v
-                    return v
-                }
-                return last
+                if i < xs.count, let v = xs[i] { return v }
+                return seed
             }
         }
         return [
@@ -344,6 +340,17 @@ public struct UniTSRuntime: Sendable {
             fill(window.resp, bases[4]),
             fill(window.spo2, bases[5])
         ]
+    }
+
+    /// 1 = measured minute. Official convert uses this so packed 0 is not a rest BPM.
+    static func packPresentMask(_ window: WatchdogWindow) -> [[Double]] {
+        func mask(_ xs: [Double?]) -> [Double] {
+            (0..<WatchdogConfig.seqLen).map { i in
+                (i < xs.count && xs[i] != nil) ? 1 : 0
+            }
+        }
+        return [mask(window.hr), mask(window.rhr), mask(window.hrv),
+                mask(window.temp), mask(window.resp), mask(window.spo2)]
     }
 
     static func finishResidual(window: WatchdogWindow, prompt: UniTSPrompt,
@@ -534,7 +541,7 @@ public struct UniTSRuntime: Sendable {
     }
 
     static func physiologyOccupancy(_ window: WatchdogWindow, features: [[Double]]) -> [Double] {
-        if WatchdogActivityFeatures.usesRawActivity(features) {
+        if !features.isEmpty {
             return features.map { WatchdogActivityFeatures.priorOccupancy($0) }
         }
         return WatchdogActivityRuntime.effortOccupancy(motion: window.motion, logits: window.activityLogits)

@@ -138,6 +138,23 @@ public struct WatchdogWindow: Equatable, Sendable {
         return WatchdogActivityFeatures.build(window: self)
     }
 
+    /// Drop a whole series when its last finite minute is older than that channel's clock.
+    /// Official UniTS / TimesFM never see a stale last pair as current.
+    public mutating func maskStaleChannels() {
+        func wipe(_ series: inout [Double?], channel: Int) {
+            if !WatchdogQuality.channelFresh(series, startUnix: startUnix, nowUnix: nowUnix,
+                                             channel: channel, family: family) {
+                series = Array(repeating: nil, count: series.count)
+            }
+        }
+        wipe(&hr, channel: 0)
+        wipe(&rhr, channel: 1)
+        wipe(&hrv, channel: 2)
+        wipe(&temp, channel: 3)
+        wipe(&resp, channel: 4)
+        wipe(&spo2, channel: 5)
+    }
+
     public enum Channel: String, Equatable, Sendable, CaseIterable, Codable, Hashable {
         case hr, rhr, hrv, temp, resp, spo2, motion
         public var isVital: Bool { self != .motion }

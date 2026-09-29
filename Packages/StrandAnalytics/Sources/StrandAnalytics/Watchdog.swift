@@ -109,6 +109,8 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
     public var sessionNativeN: Int
     /// Per-channel native counts. A missing vital does not mature a 0 usual.
     public var sessionNativeCount: [Int]
+    /// Last consumed grid minute per channel. The same sparse sample is not a new n.
+    public var lastNativeMinute: [Int]
     /// Band-eligible ticks per phase×still key for the civil day.
     public var sessionKeyTicks: [String: Int]
     /// Per-key native EMA so morning and evening do not share one mixed vector.
@@ -138,6 +140,10 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
     public var lastEventStartUnix: Int
     public var lastCutReason: String
     public var eventMemory: WatchdogEventMemory
+    /// Last TimesFM cube origin: official | hold | inject.
+    public var lastForecastSource: String
+    /// Last 30 official / inject path J values. Hold does not append.
+    public var forecastJRing: [Double]
 
     public static let empty = WatchdogCarry()
 
@@ -164,6 +170,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
                 sessionNative: [Double] = Array(repeating: 0, count: 6),
                 sessionNativeN: Int = 0,
                 sessionNativeCount: [Int] = Array(repeating: 0, count: 6),
+                lastNativeMinute: [Int] = Array(repeating: 0, count: 6),
                 sessionKeyTicks: [String: Int] = [:],
                 sessionNativeByKey: [String: [Double]] = [:],
                 sessionNativeCountByKey: [String: [Int]] = [:],
@@ -183,7 +190,9 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
                 familyChangedUnix: Int = 0,
                 reconAboveTicks: Int = 0, forecastAboveTicks: Int = 0,
                 lastEventStartUnix: Int = 0, lastCutReason: String = "",
-                eventMemory: WatchdogEventMemory = .empty) {
+                eventMemory: WatchdogEventMemory = .empty,
+                lastForecastSource: String = "hold",
+                forecastJRing: [Double] = []) {
         self.episodeId = episodeId
         self.consecutiveMismatchTicks = consecutiveMismatchTicks
         self.lastNotifiedAt = lastNotifiedAt
@@ -222,6 +231,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         self.sessionNative = sessionNative
         self.sessionNativeN = sessionNativeN
         self.sessionNativeCount = sessionNativeCount
+        self.lastNativeMinute = lastNativeMinute
         self.sessionKeyTicks = sessionKeyTicks
         self.sessionNativeByKey = sessionNativeByKey
         self.sessionNativeCountByKey = sessionNativeCountByKey
@@ -247,6 +257,8 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         self.lastEventStartUnix = lastEventStartUnix
         self.lastCutReason = lastCutReason
         self.eventMemory = eventMemory
+        self.lastForecastSource = lastForecastSource
+        self.forecastJRing = forecastJRing
     }
 
     public init(from decoder: Decoder) throws {
@@ -290,6 +302,8 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         sessionNativeN = try c.decodeIfPresent(Int.self, forKey: .sessionNativeN) ?? 0
         sessionNativeCount = try c.decodeIfPresent([Int].self, forKey: .sessionNativeCount)
             ?? Array(repeating: 0, count: 6)
+        lastNativeMinute = try c.decodeIfPresent([Int].self, forKey: .lastNativeMinute)
+            ?? Array(repeating: 0, count: 6)
         sessionKeyTicks = try c.decodeIfPresent([String: Int].self, forKey: .sessionKeyTicks) ?? [:]
         sessionNativeByKey = try c.decodeIfPresent([String: [Double]].self, forKey: .sessionNativeByKey) ?? [:]
         sessionNativeCountByKey = try c.decodeIfPresent([String: [Int]].self, forKey: .sessionNativeCountByKey) ?? [:]
@@ -316,6 +330,8 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         lastEventStartUnix = try c.decodeIfPresent(Int.self, forKey: .lastEventStartUnix) ?? 0
         lastCutReason = try c.decodeIfPresent(String.self, forKey: .lastCutReason) ?? ""
         eventMemory = try c.decodeIfPresent(WatchdogEventMemory.self, forKey: .eventMemory) ?? .empty
+        lastForecastSource = try c.decodeIfPresent(String.self, forKey: .lastForecastSource) ?? "hold"
+        forecastJRing = try c.decodeIfPresent([Double].self, forKey: .forecastJRing) ?? []
     }
 
     public mutating func resetSessionAbsOnly() {
@@ -329,6 +345,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         sessionNative = Array(repeating: 0, count: 6)
         sessionNativeN = 0
         sessionNativeCount = Array(repeating: 0, count: 6)
+        lastNativeMinute = Array(repeating: 0, count: 6)
         sessionKeyTicks = [:]
         sessionNativeByKey = [:]
         sessionNativeCountByKey = [:]
@@ -409,6 +426,8 @@ public struct WatchdogResult: Equatable, Sendable, Codable {
     public var calibrationSource: String
     public var cutReason: String
     public var eventExplained: Bool
+    /// official | hold | inject. Production never sets inject.
+    public var forecastSource: String
 }
 
 public enum Watchdog {
@@ -421,7 +440,8 @@ public enum Watchdog {
                                 previous: WatchdogCarry = .empty,
                                 inject: WatchdogInject? = nil,
                                 sleepSessionOpen: Bool = false,
-                                sleepIntervals: [WatchdogSleepInterval] = []) -> WatchdogResult {
+                                sleepIntervals: [WatchdogSleepInterval] = [],
+                                skipForecast: Bool = false) -> WatchdogResult {
         var carry = previous
         carry.phaseUsual.dropResidualScaleCenters()
         if let inject {
@@ -456,15 +476,17 @@ public enum Watchdog {
             let fam = WatchdogPhaseUsualStore.family(label: .normalStillAwake, cls: evidenced)
             let blendFam: WatchdogActivityFamily = openTail.stillNow ? .still : fam
             let livePrompt = carry.phaseUsual.blendPrompt(prompt, key: WatchdogPhaseKey(phase: phase, family: blendFam))
+            var modelWin = win
+            modelWin.maskStaleChannels()
             let residual: UniTSResidual
             do {
-                residual = try UniTSRuntime().reconstruct(win, prompt: livePrompt, tail: openTail)
+                residual = try UniTSRuntime().reconstruct(modelWin, prompt: livePrompt, tail: openTail)
             } catch {
                 return unavailable(.empty, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: carry)
             }
-            return combine(window: win, residual: residual, prompt: livePrompt, evaluations: evaluations,
+            return combine(window: modelWin, residual: residual, prompt: livePrompt, evaluations: evaluations,
                            dayLog: dayLog, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: &carry,
-                           sleepSessionOpen: sleepSessionOpen)
+                           sleepSessionOpen: sleepSessionOpen, skipForecast: skipForecast)
         }
     }
 
@@ -484,7 +506,8 @@ public enum Watchdog {
                         nowUnix: Int,
                         interval: Int,
                         carry: inout WatchdogCarry,
-                        sleepSessionOpen: Bool = false) -> WatchdogResult {
+                        sleepSessionOpen: Bool = false,
+                        skipForecast: Bool = false) -> WatchdogResult {
         let confounded = dayLog?.confoundsUsual == true
         let tail = WatchdogLiveTail.resolve(window)
         if tail.lastEffortEndUnix > carry.lastWorkoutEndUnix {
@@ -493,20 +516,36 @@ public enum Watchdog {
         if tail.period == .rest, tail.previousPeriod == .effort {
             carry.dirEma = Array(repeating: 0, count: 6)
         }
-        let lastHR = UniTSRuntime.lastPaired(window.hr, residual.reconstructedHR, from: tail.startIndex)
-        let lastRHR = UniTSRuntime.lastPaired(window.rhr, residual.reconstructedRHR, from: tail.startIndex)
-        let lastHRV = UniTSRuntime.lastPaired(window.hrv, residual.reconstructedHRV, from: tail.startIndex)
-        let lastTemp = UniTSRuntime.lastPaired(window.temp, residual.reconstructedTemp, from: tail.startIndex)
-        let lastResp = UniTSRuntime.lastPaired(window.resp, residual.reconstructedResp, from: tail.startIndex)
-        let lastSpO2 = UniTSRuntime.lastPaired(window.spo2, residual.reconstructedSpO2, from: tail.startIndex)
+        func freshPair(_ obs: [Double?], _ hat: [Double?], channel: Int) -> (obs: Double, hat: Double)? {
+            let pair = UniTSRuntime.lastPaired(obs, hat, from: tail.startIndex)
+            guard pair != nil else { return nil }
+            let age = WatchdogQuality.channelFreshnessSeconds(channel: channel, family: window.family)
+            guard WatchdogQuality.channelFresh(obs, startUnix: window.startUnix, nowUnix: nowUnix,
+                                               channel: channel, family: window.family) else {
+                return nil
+            }
+            _ = age
+            return pair
+        }
+        let lastHR = freshPair(window.hr, residual.reconstructedHR, channel: 0)
+        let lastRHR = freshPair(window.rhr, residual.reconstructedRHR, channel: 1)
+        let lastHRV = freshPair(window.hrv, residual.reconstructedHRV, channel: 2)
+        let lastTemp = freshPair(window.temp, residual.reconstructedTemp, channel: 3)
+        let lastResp = freshPair(window.resp, residual.reconstructedResp, channel: 4)
+        let lastSpO2 = freshPair(window.spo2, residual.reconstructedSpO2, channel: 5)
         let clsRaw = WatchdogActivityClass.labels(logits: window.activityLogits).last ?? "unknown"
         let logitCls = WatchdogActivityClass.allCases.first(where: { $0.rawValue == clsRaw }) ?? .unknown
         let cls = WatchdogEventGeometry.evidencedClass(window: window, tail: tail, logitCls: logitCls)
         let famName = WatchdogEventGeometry.family(of: cls)
         if carry.lastActivityFamily.isEmpty {
             carry.lastActivityFamily = famName
-            carry.familyChangedUnix = nowUnix - WatchdogEventLabeler.familyHoldSeconds
-            carry.familyStableTicks = WatchdogEventLabeler.familyHoldSeconds / WatchdogConfig.tickSeconds
+            if WatchdogEventGeometry.isExercise(cls) {
+                carry.familyChangedUnix = nowUnix
+                carry.familyStableTicks = 1
+            } else {
+                carry.familyChangedUnix = nowUnix - WatchdogEventLabeler.familyHoldSeconds
+                carry.familyStableTicks = WatchdogEventLabeler.familyHoldSeconds / WatchdogConfig.tickSeconds
+            }
         } else if famName == carry.lastActivityFamily {
             carry.familyStableTicks += 1
         } else {
@@ -541,7 +580,11 @@ public enum Watchdog {
         let labelJ = direction.joint
         let reconJ = direction.severityJoint
         adapted.jointEnergy = reconJ
-        let absR = rawR.map { abs($0 ?? 0) }
+        let present = rawR.map { $0 != nil }
+        var absR = [Double](repeating: 0, count: 6)
+        for k in 0..<min(6, rawR.count) {
+            if let r = rawR[k] { absR[k] = abs(r) }
+        }
         let safety = WatchdogSafety.fired(window)
         let previousSafety = carry.lastSafety
         let previousFused = carry.lastJointEnergy
@@ -559,7 +602,8 @@ public enum Watchdog {
                                 scale: adapted.scaleSpO2, floor: WatchdogConfig.spo2Scale)
         carry.quietJointEma = 0
         let forecast = WatchdogForecastRuntime().step(window: window, residual: adapted, prompt: prompt,
-                                                     carry: carry, nowUnix: nowUnix, tail: tail)
+                                                     carry: carry, nowUnix: nowUnix, tail: tail,
+                                                     skipForecast: skipForecast)
         let fcUsual = WatchdogForecastRuntime.pathCenter(residual: adapted, prompt: prompt)
         let fcScale = [
             adapted.scaleHR.last ?? WatchdogConfig.hrScale,
@@ -631,7 +675,14 @@ public enum Watchdog {
         carry.lastEventLabel = decision.label.rawValue
         carry.lastActivityFamily = famName
         carry.lastForecastJoint = forecastLabelJ
-        let eventHint = decision.label
+        carry.lastForecastSource = forecast.source
+        if forecast.source == "official" || forecast.source == "inject" {
+            carry.forecastJRing.append(forecastLabelJ)
+            if carry.forecastJRing.count > 30 {
+                carry.forecastJRing.removeFirst(carry.forecastJRing.count - 30)
+            }
+        }
+        var eventHint = decision.label
         var hot: [String] = []
         if eHR >= WatchdogCalibration.tNote { hot.append("HR") }
         if eRHR >= WatchdogCalibration.tNote { hot.append("RHR") }
@@ -653,6 +704,15 @@ public enum Watchdog {
 
         let severity = WatchdogScores.severity(recon: reconJ, forecast: forecastJ, persistTicks: persistTicks,
                                                safety: safety, confounded: confounded, personalOff: personalOff)
+        if severity == .severe && !safety {
+            switch eventHint {
+            case .normalStillAwake, .normalSleep, .forecastDriftOnly,
+                 .workoutWalk, .workoutRun, .workoutCycle, .workoutLift, .postWorkout:
+                eventHint = direction.breadth >= 0.34 ? .abnormalMultiDirection : .abnormalStillTachycardia
+            default:
+                break
+            }
+        }
         if WatchdogEventLabeler.earlyAllowed(eventHint) && forecastLabelJ >= WatchdogCalibration.tNote
             && severity != .severe && severity != .active {
             carry.earlyTicks += 1
@@ -748,31 +808,40 @@ public enum Watchdog {
             carry.quietAbsTemp = 0; carry.quietAbsResp = 0; carry.quietAbsSpO2 = 0
             carry.quietN = 0
         }
+        let recovering = carry.lastWorkoutEndUnix > 0
+            && nowUnix - carry.lastWorkoutEndUnix < WatchdogEventLabeler.postWorkoutSeconds
+        let presentMax = zip(absR, present).compactMap { $0.1 ? $0.0 : nil }.max() ?? 0
         let bandLearn = WatchdogBand.learnable(eventHint) && bandFam != .other && !safety
             && reconJ < WatchdogCalibration.tNote && !hot.contains("HR")
-            && (absR.max() ?? 0) < WatchdogBand.residualCap && !confounded
+            && presentMax < WatchdogBand.residualCap && !confounded && !recovering
         let sessionElig = WatchdogEventLabeler.sidecarEligible(eventHint) && !safety
             && reconJ < WatchdogCalibration.tNote && !hot.contains("HR")
-            && (absR.max() ?? 0) < WatchdogBand.residualCap && !confounded
+            && presentMax < WatchdogBand.residualCap && !confounded && !recovering
             && WatchdogBand.shouldCountMinute(nowUnix: nowUnix, lastUnix: carry.sessionLastUnix)
         if sessionElig {
             if carry.sessionAbs.count < 6 { carry.sessionAbs = Array(repeating: 0, count: 6) }
             if carry.sessionNative.count < 6 { carry.sessionNative = Array(repeating: 0, count: 6) }
             if carry.sessionNativeCount.count < 6 { carry.sessionNativeCount = Array(repeating: 0, count: 6) }
             let a = 0.12
-            for k in 0..<6 {
+            if carry.lastNativeMinute.count < 6 { carry.lastNativeMinute = Array(repeating: 0, count: 6) }
+            let priorMinute = carry.lastNativeMinute
+            for k in 0..<6 where present[k] {
                 carry.sessionAbs[k] = (1 - a) * carry.sessionAbs[k] + a * absR[k]
             }
             let nativeObs: [Double?] = [lastHR?.obs, lastRHR?.obs, lastHRV?.obs,
                                         lastTemp?.obs, lastResp?.obs, lastSpO2?.obs]
+            let series: [[Double?]] = [window.hr, window.rhr, window.hrv, window.temp, window.resp, window.spo2]
             for k in 0..<6 {
                 guard let obs = nativeObs[k], obs.isFinite else { continue }
+                let minute = WatchdogQuality.lastFiniteMinuteUnix(series[k], startUnix: window.startUnix) ?? 0
+                guard minute > carry.lastNativeMinute[k] else { continue }
                 if carry.sessionNativeCount[k] == 0 {
                     carry.sessionNative[k] = obs
                 } else {
                     carry.sessionNative[k] = (1 - a) * carry.sessionNative[k] + a * obs
                 }
                 carry.sessionNativeCount[k] += 1
+                carry.lastNativeMinute[k] = minute
             }
             let sessionKey = WatchdogPhaseKey(phase: sessionPhase, family: .still)
             carry.sessionLastUnix = nowUnix
@@ -783,6 +852,8 @@ public enum Watchdog {
             if keyedCount.count < 6 { keyedCount = Array(repeating: 0, count: 6) }
             for k in 0..<6 {
                 guard let obs = nativeObs[k], obs.isFinite else { continue }
+                let minute = WatchdogQuality.lastFiniteMinuteUnix(series[k], startUnix: window.startUnix) ?? 0
+                guard minute > priorMinute[k] else { continue }
                 if keyedCount[k] == 0 {
                     keyed[k] = obs
                 } else {
@@ -799,7 +870,8 @@ public enum Watchdog {
         var bandState = carry.bandByKey[phaseKey.id] ?? .empty
         var bandGain: [Double]
         if WatchdogBand.learnable(eventHint), bandFam != .other {
-            bandGain = WatchdogBand.update(&bandState, absResidual: absR, eligible: bandLearn, nowUnix: nowUnix)
+            bandGain = WatchdogBand.update(&bandState, absResidual: absR, eligible: bandLearn,
+                                          nowUnix: nowUnix, present: present)
             carry.bandByKey[phaseKey.id] = bandState
             carry.mirrorBand(bandState, key: phaseKey.id)
         } else {
@@ -873,7 +945,8 @@ public enum Watchdog {
             allowed: WatchdogEventLabeler.earlyAllowed(eventHint),
             severity: severity,
             trustPct: pageTrust,
-            persistTicks: carry.earlyTicks)
+            persistTicks: carry.earlyTicks,
+            forecastSource: forecast.source)
 
         let civil = Self.civilDay(nowUnix)
         if carry.lastCivilDay.isEmpty { carry.lastCivilDay = civil }
@@ -962,7 +1035,8 @@ public enum Watchdog {
             eventLabel: eventHint.rawValue,
             calibrationSource: WatchdogCalibration.version,
             cutReason: decision.cutReason,
-            eventExplained: decision.explained
+            eventExplained: decision.explained,
+            forecastSource: forecast.source
         )
     }
 
@@ -1062,11 +1136,18 @@ public enum Watchdog {
     static func safetyCap(window: WatchdogWindow) -> Bool {
         let tail = WatchdogLiveTail.resolve(window)
         guard tail.stillNow else { return false }
-        if let hr = tail.last(window.hr), hr > WatchdogConfig.restHrHigh { return true }
-        if let hr = tail.last(window.hr), hr > 0, hr < WatchdogConfig.restHrLow { return true }
-        if let t = tail.last(window.temp), t < WatchdogConfig.tempLowC || t > WatchdogConfig.tempHighC { return true }
-        if let r = tail.last(window.resp), r < WatchdogConfig.respLow || r > WatchdogConfig.respHigh { return true }
-        if let h = tail.last(window.hrv), h > 0, h < WatchdogConfig.rmssdLow || h > WatchdogConfig.rmssdHigh { return true }
+        func freshLast(_ xs: [Double?], channel: Int) -> Double? {
+            guard WatchdogQuality.channelFresh(xs, startUnix: window.startUnix, nowUnix: window.nowUnix,
+                                              channel: channel, family: window.family) else {
+                return nil
+            }
+            return tail.last(xs)
+        }
+        if let hr = freshLast(window.hr, channel: 0), hr > WatchdogConfig.restHrHigh { return true }
+        if let hr = freshLast(window.hr, channel: 0), hr > 0, hr < WatchdogConfig.restHrLow { return true }
+        if let t = freshLast(window.temp, channel: 3), t < WatchdogConfig.tempLowC || t > WatchdogConfig.tempHighC { return true }
+        if let r = freshLast(window.resp, channel: 4), r < WatchdogConfig.respLow || r > WatchdogConfig.respHigh { return true }
+        if let h = freshLast(window.hrv, channel: 2), h > 0, h < WatchdogConfig.rmssdLow || h > WatchdogConfig.rmssdHigh { return true }
         return false
     }
 
@@ -1225,7 +1306,8 @@ public enum Watchdog {
             eventLabel: reason == .wristOff ? WatchdogEventLabel.wristOff.rawValue : WatchdogEventLabel.gap.rawValue,
             calibrationSource: WatchdogCalibration.version,
             cutReason: "quality",
-            eventExplained: false
+            eventExplained: false,
+            forecastSource: "hold"
         )
     }
 

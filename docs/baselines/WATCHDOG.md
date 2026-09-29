@@ -24,7 +24,7 @@ Layer 1 is optional **input**. A shown usual (and a mature still sidecar) may ti
 3. **Prompt** — UniTS / the Swift prior reconstruct this half-hour first. A shown Layer 1 usual (HR ≠ RHR) and a mature phase×activity sidecar may *tighten* that prompt. They do not block the short-term call. Still no Layer 1 write.
 4. **UniTS reconstruct** — dotted expected line and predicted range for HR, RHR, HRV, temp, breathing, SpO₂. That corridor **is** the short-term baseline.
 5. **Direction** — all six channels, equal weight. \(J = \sum \min(\|r_k\|, 1)\). RHR is not a second HR addend.
-6. **TimesFM student** — at most once a minute. Can show **Looking ahead**. Cannot severe-notify.
+6. **TimesFM** — at most once a minute. Official path is TimesFM **2.5** (Apache-2.0). TimesFM **3.0** weights are non-commercial and must not ship. Can show **Looking ahead**. Cannot severe-notify.
 7. **Events** — exclusive name after a 120 s family hold. No human labels. Workout only if reconstruction is quiet.
 8. **Green band** — small σ updates on the current phase×activity key after 14 **minutes** (still/sleep, or a held workout family). A walk key does not write the still key. Forecast-drift and spikes do not widen it. Session ±5% after ready + 8 min.
 9. **Safety** — still-wrist extrema can page without the models.
@@ -83,9 +83,13 @@ First card on **Baseline**: each vital in its own block — live value, predicte
 
 | File | Job |
 |---|---|
-| `UniTS_AD.mlpackage` | Reconstruct this 30-minute strip |
-| `TimesFM3_Student.mlpackage` | Short forecast student |
+| `UniTS_AD.mlpackage` | Reconstruct this 30-minute strip. Target: official mims-harvard UniTS pretrained (`units_x32_pretrain`). Export: `Tools/units-watchdog/export_official_coreml.py`. |
+| `TimesFM3_Student.mlpackage` | Forecast cube until TimesFM **2.5-200m** Core ML convert lands (not TimesFM 3.0 — production-banned). |
 | Swift prior | Fallback if Core ML cannot load |
+
+TimesFM 3.0 official weights are licensed `timesfm-non-commercial-license-v1.0` and **cannot** go in a production app. Official TimesFM we ship is **2.5-200m** (Apache-2.0). Official UniTS is the mims-harvard pretrained ckpt, converted to the same 30×6 I/O. The Swift prior stays if that convert is not on disk.
+
+Live Watchdog only uses **30 minutes in** and **5 minutes out**, plus σ floors and a clipped `J`. On that strip, 2.5 vs 3.0 is a small hat difference, not a different product. The large jump is formula-student → official 2.5 / official UniTS. See `docs/FRWHOOP_WATCHDOG_IMPLEMENTATION_LOG_29_SEP_2026.md` (Official models).
 
 | Piece | Path |
 |---|---|
