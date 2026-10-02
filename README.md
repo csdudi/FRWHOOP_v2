@@ -46,9 +46,9 @@ Code: `LongitudinalBaseline.swift` · [full note](docs/baselines/LAYER1.md)
 
 The top of the Baseline tab is the live card: heart rate, still HR, HRV, wrist temp, breathing, SpO₂. Each row is the live value against a **predicted range** for that half-hour (model \(\hat{x} \pm \sigma\), not the 7-day / 60-day band). Empty minutes stay empty (a dash). A stale vital is dropped before reconstruct. Wrist-off is **unavailable**, not “recovered.” Only the **active** strap fills the window.
 
-The live path can use a **shown** long-term usual as a prompt. It does **not** write Layer 1 usuals. Unique gated minutes can feed Layer 1 **day tapes**. **TRUST** on this card is how much to believe this stretch’s in-range / off call. Below 35% the card says it is still learning and will not call a reading off. Looking-ahead (TimesFM) cannot page as severe. TimesFM 3.0 weights are not shipped.
+The live path can use a **shown** long-term usual as a prompt. It does **not** write Layer 1 usuals. Unique gated minutes can feed Layer 1 **day tapes**. **TRUST** on this card is how much to believe this stretch’s in-range / off call. Below 35% the card says it is still learning and will not call a reading off. Looking-ahead (TimesFM student) cannot page as severe. TimesFM 3.0 weights are not shipped. A thin window can still **safety**-page a fresh still-rest extreme. History backfill does not page.
 
-A phone notification is extreme only, and is not a diagnosis.
+A phone notification is extreme only (first severe of an episode), and is not a diagnosis.
 
 Code: `Watchdog.swift`, `WatchdogView.swift` · [full note](docs/baselines/WATCHDOG.md)
 

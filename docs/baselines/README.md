@@ -2,7 +2,7 @@
 
 This fork’s product work is **personal baselines on the device**. Charge, Layer 1, and Watchdog are three separate engines. They share the strap’s raw samples. They do **not** share usuals, green ranges, or TRUST scores. They are never averaged.
 
-Watchdog never writes Layer 1. Layer 1 never scores the last 30 minutes. Neither path infers a treatment start from heart rate or names a drug. Charge / Recovery stay on their own engines.
+Watchdog never writes Layer 1. Layer 1 never scores the last 30 minutes. Neither path infers a treatment start from heart rate or names a drug. Charge / Recovery stay on their own engines. Illness nights do not refresh Layer 1 “last OK.” Watchdog learning freezes while an episode or personal-off is open. Bundled forecast graphs are **students**; official TimesFM 2.5 convert is deferred.
 
 | Engine | Question | Window | Usual / range | Code |
 |---|---|---|---|---|

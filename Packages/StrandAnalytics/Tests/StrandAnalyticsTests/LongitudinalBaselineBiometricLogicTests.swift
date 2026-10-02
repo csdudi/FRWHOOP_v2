@@ -221,6 +221,20 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
         XCTAssertNil(imu.todayNative)
     }
 
+    func testIllnessNightDoesNotRefreshLastQualityOK() {
+        let t = LongitudinalBaseline.isoEpochDay(asOf)!
+        var rows: [LBDailyObservation] = []
+        for e in (t - 60)...(t - 20) {
+            rows.append(ok(iso(e), 60, series: .sleepRHR))
+        }
+        rows.append(ok(iso(t - 1), 88, series: .sleepRHR))
+        var ill = LBDayLog()
+        ill.feltIll = true
+        let ev = eval(.sleepRHR, obs: rows, trial: LBTrialRequest(dayLogsByDay: [iso(t - 1): ill]))
+        XCTAssertEqual(ev.carry.lastQualityOKEpoch, t - 20)
+        XCTAssertTrue(ev.stale, ev.consoleReport)
+    }
+
     func testHowOffHiddenWhenTrustUnder35IsThePublishedRule() {
         XCTAssertEqual(LongitudinalBaseline.trustHideThreshold, 35)
         for s in LBSeries.allCases {

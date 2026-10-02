@@ -28,10 +28,10 @@ Sleep RHR is never mixed with awake-rest HR or with steps. Catalog is **18** ser
 | Context | What trains today | What stays empty until measured minutes exist |
 |---|---|---|
 | Sleep | RHR, ln(RMSSD), wrist temp, breathing, SpO₂ mean (`DailyMetric`) | SpO₂ nadir until ≥ 3 unique fresh sleep percents |
-| Awake still / moving / all-day | Unique rest / effort / all-day minutes from the Watchdog window (HR, ln(RMSSD), SpO₂). Rest tape skips the 20 min post-workout window. | Any stub that has not met its minute floor (HR/HRV ≥ 8; SpO₂ ≥ 4) |
+| Awake still / moving / all-day | Unique rest / effort / all-day minutes from the Watchdog window (HR, RMSSD ms, SpO₂). Sleep is the last **fresh** minute’s col-19 bit **or** an open sleep interval — those minutes never train `awakeRest*`. Rest tape also skips the 20 min post-workout window. | Any stub that has not met its minute floor (HR/HRV ≥ 8; SpO₂ ≥ 4) |
 | Waking load | Steps (recorded). Movement energy when the strap has IMU. Active minutes when occupancy or locomotion is high. | Active minutes until at least one unique minute |
 
-HRV math is on ln(RMSSD); the card shows ms. Each series has a floor so a tiny spread cannot turn a 1 bpm wiggle into a huge off call. IMU floor is 0.02 (family `imu`). Coverage with a **nil** coverage field is low-quality, not a free pass.
+HRV math is on ln(RMSSD); the card shows ms. Daytime Watchdog tapes store **native RMSSD ms**; `toMath` is the only ln. Persisted leftover ln buckets (mean in (0, 5)) are `exp`’d once on load (`daytape.v2`). Each series has a floor so a tiny spread cannot turn a 1 bpm wiggle into a huge off call. IMU floor is 0.02 (family `imu`). Coverage with a **nil** coverage field is low-quality, not a free pass.
 
 Zero or nil steps do not train as `.ok`.
 
@@ -44,10 +44,11 @@ Establish N = 21. Coverage ≥ 60 unique minutes. Same 7-day / 60-day copies as 
 ## One night
 
 1. Build a daily observation from a **recorded** column, the IMU sidecar, or a published `LBDayTape` mean, or skip if the day is thin or confounded (felt ill, travel, extra med, alcohol, off-typical sleep/diet). An unmarked night is still clean — the log does not invent illness. Watchdog’s live confounder bit uses **calendar today** (and yesterday only if a sleep session is still open). Layer 1 `asOf` is still the night being scored.
-2. Compare tonight to each copy (\(z\) vs center ± \(k \times\) spread, \(k = 2\)).
-3. A large residual can flag “off usual” without immediately moving the center.
-4. CUSUM tracks a slow shift across nights. Missing days skip the accumulator; they do not reset it.
-5. If the wearer logged a treatment start, the trial layer **freezes** the pre-start path. Watchdog cannot invent that start.
+2. **last OK / stale** use the last **clean** trainable night (`nightIsClean`), not an illness day that still has a number. A held 60-day median does not look “fresh” because a sick night arrived. `establishedLong` / `showLong` are computed **after** habit / context remap.
+3. Compare tonight to each copy (\(z\) vs center ± \(k \times\) spread, \(k = 2\)).
+4. A large residual can flag “off usual” without immediately moving the center.
+5. CUSUM tracks a slow shift across nights. Missing days skip the accumulator; they do not reset it.
+6. If the wearer logged a treatment start, the trial layer **freezes** the pre-start path. Watchdog cannot invent that start.
 
 ### Medication labels
 
@@ -75,4 +76,4 @@ Watchdog **never writes** Layer 1 7-day / 60-day snapshots. After a live tick it
 | Day tapes (stubs) | `LBDayTape.swift`, `BaselineStore.ingestWatchdogTape` |
 | Trial / freeze | `LongitudinalBaselineTrial.swift` |
 | App | `Strand/Data/BaselineStore.swift`, `BaselineMonitorView.swift`, `TreatmentMarkingView.swift` |
-| Pins | `LongitudinalBaselineBiometricLogicTests`, `LongitudinalBaselinePass27Tests`, catalog / audit suites |
+| Pins | `LongitudinalBaselineBiometricLogicTests` (incl. illness `lastOK`), `WatchdogV40CloseoutTests` (HRV ms tape), catalog / audit suites |

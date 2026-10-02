@@ -18,9 +18,14 @@ enum WatchdogBackgroundScheduler {
                 task.setTaskCompleted(success: false)
                 return
             }
-            refresh.expirationHandler = { refresh.setTaskCompleted(success: false) }
-            Task {
+            var work: Task<Void, Never>?
+            refresh.expirationHandler = {
+                work?.cancel()
+                refresh.setTaskCompleted(success: false)
+            }
+            work = Task {
                 await runHandler?()
+                if Task.isCancelled { return }
                 scheduleIfNeeded()
                 refresh.setTaskCompleted(success: true)
             }

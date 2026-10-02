@@ -19,17 +19,18 @@ Layer 1 is optional **input**. A shown usual (and a mature still sidecar) may ti
 
 `WatchdogService.tick` (foreground ~20 s, or a background refresh) → **active strap only** → 30×60 s window → `Watchdog.evaluate`:
 
-1. **Quality** — coverage, HR gaps, wrist-off. `deviceOff` wins; a leftover 2A37 clock cannot clear WRIST_OFF. Unavailable does not run the models.
+1. **Quality** — coverage, HR gaps, wrist-off. `deviceOff` wins; a leftover 2A37 clock cannot clear WRIST_OFF. Wrist-off stays unavailable. A **thin** window still runs **safety** (fresh still-rest extrema) without UniTS. Other quality fails do not run the models.
 2. **Clocks** — each vital has its own freshness (HR/RHR: WHOOP packet clock; HRV 5 min; temp 8 min; resp / SpO₂ 6 min). Stale series are wiped (`maskStaleChannels`) **before** UniTS / TimesFM. Missing is nil, not BPM 0. Residuals and learning skip absent channels. The same sparse minute is not a new sample.
 3. **Activity** — the 20-col row drives occupancy every minute. Unknown stays unknown (not walk). First **exercise** family holds 120 s before a workout name. After effort, still-band and rest day-tape wait 20 min; models still infer.
 4. **Prompt** — UniTS / the Swift prior reconstruct this half-hour first. A shown Layer 1 usual (HR ≠ RHR) and a mature phase×activity sidecar may *tighten* that prompt. They do not block the short-term call. `evaluate` never writes 7-day / 60-day snapshots.
 5. **UniTS reconstruct** — dotted expected line and predicted range for HR, RHR, HRV, temp, breathing, SpO₂. That corridor **is** the short-term baseline (model σ, not Layer 1 MAD).
 6. **Direction** — two scores. Tanh `joint` decides “UniTS explained this strip” (workout names). Clip-sum `severityJoint` (RHR out, each \|r\| capped at 1) decides severe. If severity is severe, the name cannot stay `normal_*`.
-7. **TimesFM** — at most once a minute (`forecastSource`: official session, hold, or test inject). Official **weights** we intend are TimesFM **2.5-200m** (Apache-2.0). TimesFM **3.0** must not ship. Can show **Looking ahead**. Cannot severe-notify. Background ticks may skip TimesFM and still run UniTS + safety.
-8. **Confounders** — felt-ill / extra med **today** (calendar day, not Layer 1 `asOf`) stops still-band and rest-tape learning. Models still draw. Open sleep may still use yesterday’s log.
-9. **Green band** — small σ updates on the current phase×activity key after 14 **present** minutes of that channel (still/sleep, or a held workout family). A walk key does not write the still key. Post-workout is not learnable.
-10. **Safety** — still-wrist extrema can page only if that channel is **fresh**.
-11. **Day tape** — after the tick, unique gated minutes go to Layer 1 `LBDayTape`. That is observations, not snapshot write.
+7. **TimesFM** — at most once a minute (`forecastSource`: **student** / hold / test inject). Official **weights** we intend are TimesFM **2.5-200m** (Apache-2.0); that convert is **deferred**. Bundled graphs are students — not labelled official. Wearer Early is **shadow** until official convert. TimesFM **3.0** must not ship. Cannot severe-notify. Background ticks may skip TimesFM and still run UniTS + safety.
+8. **Confounders** — felt-ill / extra med **today** (calendar day, not Layer 1 `asOf`) stops still-band and rest-tape learning. Models still draw. Open sleep may still use yesterday’s log. Live UniTS prompt `asOf` is **calendar yesterday** (newest scored night ≤ today), not the Baseline calendar swipe.
+9. **Green band** — small σ updates on the current phase×activity key after 14 **present** minutes of that channel (still/sleep, or a held workout family). A walk key does not write the still key. Post-workout is not learnable. The same **civil minute** does not increment `n`. Band and sidecar **do not learn** while severity is candidate/active/severe or Layer 1 **personal-off** (native HRV vs the shown copy — independent of the UniTS hat).
+10. **Safety** — still-wrist extrema can page only if that channel is **fresh**, including when coverage is incomplete. Historical backfill and `liveAlerts: false` cannot `shouldNotify`.
+11. **Day tape** — after the tick, unique gated minutes go to Layer 1 `LBDayTape`. Sleep minutes (col-19 or open interval) never write `awakeRest*`. That is observations, not snapshot write.
+12. **Carry / notify** — UserDefaults carry is namespaced by **active `deviceId`**; switching straps clears live rings. First severe of an episode pages once. Mismatch persist is per **civil minute**. Delivery is queued / sent / failed. BG expiration **cancels** the in-flight tick.
 
 ## How each vital’s short-term baseline is calculated
 
@@ -75,7 +76,9 @@ Empty minutes stay empty. The card does not invent a line.
 
 ## Notifications
 
-A real push is extreme only: safety extrema, or a severe reconstruction that persists and is an abnormal / safety family. Not a diagnosis. No push for looking ahead, workouts, or normal still/sleep. Thresholds stay `prior-untuned` (1.0 / 1.6 / 2.4, persist 2 ticks) until a measured catalog is promoted.
+A real push is extreme only: safety extrema, or a severe reconstruction that persists and is an abnormal / safety family. The **first** severe of an episode pages once. Not a diagnosis. No push for looking ahead, workouts, normal still/sleep, or history backfill. Thresholds stay `prior-untuned` engineering defaults (1.0 / 1.6 / 2.4, persist 2 **minutes**) until a measured catalog is promoted.
+
+Live **Off** is Watchdog `severity ≥ candidate`, safety, or personal-off. It is **not** Layer 1 HOW OFF.
 
 ## What the wearer sees
 
@@ -100,8 +103,9 @@ Live Watchdog only uses **30 minutes in** and **5 minutes out**, plus σ floors 
 | Quality / notify | `WatchdogV2.swift` |
 | Events / band | `WatchdogEventGeometry.swift`, `WatchdogEventLabeler.swift`, `WatchdogPhaseUsual.swift` |
 | UI | `Strand/Screens/WatchdogView.swift` |
-| Live load | `Strand/Watchdog/WatchdogService.swift` (active `deviceId` only) |
-| Background tick | `Strand/Watchdog/WatchdogBackgroundScheduler.swift` |
+| Live load | `Strand/Watchdog/WatchdogService.swift` (active `deviceId` only; carry `v2.{deviceId}`) |
+| Notify | `Strand/Watchdog/WatchdogNotifier.swift` (queued / sent / failed) |
+| Background tick | `Strand/Watchdog/WatchdogBackgroundScheduler.swift` (cancel on expire) |
 | Day-tape ingest | `LBDayTape.swift` via `BaselineStore` |
 | Official convert (not yet replacing packages) | `Tools/units-watchdog/export_official_coreml.py` |
-| Pins | `Packages/StrandAnalytics/Baseline/units/` |
+| Pins | `Packages/StrandAnalytics/Baseline/units/`, `WatchdogV40CloseoutTests`, `WatchdogStatisticsContractTests` |

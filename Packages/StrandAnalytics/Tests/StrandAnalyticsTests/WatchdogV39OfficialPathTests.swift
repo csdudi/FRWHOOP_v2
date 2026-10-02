@@ -65,6 +65,9 @@ final class WatchdogV39OfficialPathTests: XCTestCase {
         XCTAssertFalse(WatchdogForecastRuntime.wearerEarly(
             pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 80, persistTicks: 2,
             forecastSource: "hold"))
+        XCTAssertFalse(WatchdogForecastRuntime.wearerEarly(
+            pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 80, persistTicks: 2,
+            forecastSource: "student"))
         XCTAssertTrue(WatchdogForecastRuntime.wearerEarly(
             pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 80, persistTicks: 2,
             forecastSource: "official"))

@@ -74,7 +74,7 @@ final class WatchdogV35ForecastEarlyTests: XCTestCase {
         XCTAssertEqual(path.labelJoint, 0, accuracy: 1e-9)
         XCTAssertFalse(WatchdogForecastRuntime.wearerEarly(
             pathJ: path.labelJoint, allowed: true, severity: .withinLimits,
-            trustPct: 80, persistTicks: 2))
+            trustPct: 80, persistTicks: 2, forecastSource: "inject"))
     }
 
     func testTwoChannelFullPathCanEarly() throws {
@@ -102,9 +102,11 @@ final class WatchdogV35ForecastEarlyTests: XCTestCase {
 
     func testLowTrustHidesWearerEarly() {
         XCTAssertTrue(WatchdogForecastRuntime.wearerEarly(
-            pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 80, persistTicks: 2))
+            pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 80, persistTicks: 2,
+            forecastSource: "inject"))
         XCTAssertFalse(WatchdogForecastRuntime.wearerEarly(
-            pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 20, persistTicks: 2))
+            pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 20, persistTicks: 2,
+            forecastSource: "inject"))
     }
 
     func testForecastStillCannotSevere() throws {

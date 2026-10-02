@@ -38,60 +38,91 @@ public struct LBDayTape: Equatable, Sendable, Codable {
 
     public init(day: String) { self.day = day }
 
+    /// Persisted v1 stored ln(RMSSD). Means in (0, 5) are leftover ln → ms.
+    public mutating func migrateHrvFromLnIfNeeded() {
+        func lift(_ b: inout LBMinuteBucket) {
+            guard b.n > 0, b.mean.map({ $0 > 0 && $0 < 5 }) == true else { return }
+            b.sum = exp(b.sum / Double(b.n)) * Double(b.n)
+        }
+        lift(&restHRV)
+        lift(&effortHRV)
+        lift(&allHRV)
+    }
+
     public mutating func ingest(window: WatchdogWindow, nowUnix: Int,
-                                lastWorkoutEndUnix: Int = 0) -> Bool {
+                                lastWorkoutEndUnix: Int = 0,
+                                sleepIntervals: [WatchdogSleepInterval] = []) -> Bool {
         let tail = WatchdogLiveTail.resolve(window)
         let recovering = tail.postWorkout(carryEndUnix: lastWorkoutEndUnix, nowUnix: nowUnix)
         let features = window.resolvedActivityFeatures()
-        let lastRow = features.last ?? []
-        let sleepNow = WatchdogActivityFeatures.sleepBit(lastRow) == 1
-        let occ = lastRow.isEmpty ? 0 : WatchdogActivityFeatures.priorOccupancy(lastRow)
-        let loco = lastRow.isEmpty ? 0 : WatchdogActivityFeatures.stepLocomotion(lastRow)
         var changed = false
 
-        func lastFresh(_ series: [Double?], channel: Int) -> (Double, Int)? {
+        func lastFresh(_ series: [Double?], channel: Int) -> (Double, Int, Int)? {
             guard WatchdogQuality.channelFresh(series, startUnix: window.startUnix, nowUnix: nowUnix,
                                                channel: channel, family: window.family),
                   let t = WatchdogQuality.lastFiniteMinuteUnix(series, startUnix: window.startUnix)
             else { return nil }
             let i = (t - window.startUnix) / WatchdogConfig.gridSeconds
             guard i >= 0, i < series.count, let v = series[i] else { return nil }
-            return (v, t)
+            return (v, t - t % 60, i)
         }
 
-        if let (v, t) = lastFresh(window.hr, channel: 0) {
+        func sleepAt(minuteUnix: Int, row: Int) -> Bool {
+            if sleepIntervals.contains(where: { $0.contains(minuteUnix) }) { return true }
+            guard row >= 0, row < features.count else { return false }
+            return WatchdogActivityFeatures.sleepBit(features[row]) == 1
+        }
+
+        if let (v, t, i) = lastFresh(window.hr, channel: 0) {
+            let sleepNow = sleepAt(minuteUnix: t, row: i)
+            let row = i < features.count ? features[i] : []
+            let occ = row.isEmpty ? 0 : WatchdogActivityFeatures.priorOccupancy(row)
+            let loco = row.isEmpty ? 0 : WatchdogActivityFeatures.stepLocomotion(row)
             changed = allHR.addUnique(value: v, minuteUnix: t) || changed
             if sleepNow {
                 // Sleep HR stays on DailyMetric nights; tape does not invent sleep RHR.
-            } else if tail.period == .effort {
+            } else if tail.period == .effort || occ >= 0.15 || loco >= 0.5 {
                 changed = effortHR.addUnique(value: v, minuteUnix: t) || changed
-            } else if tail.stillNow, !recovering {
+            } else if occ < 0.15, !recovering {
                 changed = restHR.addUnique(value: v, minuteUnix: t) || changed
             }
         }
-        if let (v, t) = lastFresh(window.hrv, channel: 2) {
-            let ln = log(max(v, 1))
-            changed = allHRV.addUnique(value: ln, minuteUnix: t) || changed
-            if !sleepNow, tail.period == .effort {
-                changed = effortHRV.addUnique(value: ln, minuteUnix: t) || changed
-            } else if !sleepNow, tail.stillNow, !recovering {
-                changed = restHRV.addUnique(value: ln, minuteUnix: t) || changed
+        if let (v, t, i) = lastFresh(window.hrv, channel: 2) {
+            let sleepNow = sleepAt(minuteUnix: t, row: i)
+            let row = i < features.count ? features[i] : []
+            let occ = row.isEmpty ? 0 : WatchdogActivityFeatures.priorOccupancy(row)
+            let loco = row.isEmpty ? 0 : WatchdogActivityFeatures.stepLocomotion(row)
+            // Native RMSSD ms. Layer 1 `toMath` is the only ln.
+            changed = allHRV.addUnique(value: v, minuteUnix: t) || changed
+            if !sleepNow, tail.period == .effort || occ >= 0.15 || loco >= 0.5 {
+                changed = effortHRV.addUnique(value: v, minuteUnix: t) || changed
+            } else if !sleepNow, occ < 0.15, !recovering {
+                changed = restHRV.addUnique(value: v, minuteUnix: t) || changed
             }
         }
-        if let (v, t) = lastFresh(window.spo2, channel: 5) {
+        if let (v, t, i) = lastFresh(window.spo2, channel: 5) {
+            let sleepNow = sleepAt(minuteUnix: t, row: i)
+            let row = i < features.count ? features[i] : []
+            let occ = row.isEmpty ? 0 : WatchdogActivityFeatures.priorOccupancy(row)
+            let loco = row.isEmpty ? 0 : WatchdogActivityFeatures.stepLocomotion(row)
             changed = allSpO2.addUnique(value: v, minuteUnix: t) || changed
             if sleepNow, t > sleepSpO2LastMinute {
                 sleepSpO2Min = sleepSpO2Min.map { min($0, v) } ?? v
                 sleepSpO2N += 1
                 sleepSpO2LastMinute = t
                 changed = true
-            } else if !sleepNow, tail.period == .effort {
+            } else if !sleepNow, tail.period == .effort || occ >= 0.15 || loco >= 0.5 {
                 changed = effortSpO2.addUnique(value: v, minuteUnix: t) || changed
-            } else if !sleepNow, tail.stillNow, !recovering {
+            } else if !sleepNow, occ < 0.15, !recovering {
                 changed = restSpO2.addUnique(value: v, minuteUnix: t) || changed
             }
         }
-        if !sleepNow, (occ >= 0.15 || loco >= 0.5), nowUnix > lastActiveMinute {
+        let lastRow = features.last ?? []
+        let lastMinute = nowUnix - (nowUnix % 60)
+        let lastSleep = sleepAt(minuteUnix: lastMinute, row: max(0, features.count - 1))
+        let occ = lastRow.isEmpty ? 0 : WatchdogActivityFeatures.priorOccupancy(lastRow)
+        let loco = lastRow.isEmpty ? 0 : WatchdogActivityFeatures.stepLocomotion(lastRow)
+        if !lastSleep, (occ >= 0.15 || loco >= 0.5), nowUnix > lastActiveMinute {
             let minute = nowUnix - (nowUnix % 60)
             if minute > lastActiveMinute {
                 activeMinutes += 1

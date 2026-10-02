@@ -12,11 +12,13 @@ final class WatchdogService {
     private var liveHRRing: [HRSample] = []
     private var liveRRRing: [RRInterval] = []
     private var lastRRSeq: Int = -1
+    private var boundDeviceId: String = ""
     private var cancellables = Set<AnyCancellable>()
 
     func start(on model: AppModel) {
         self.model = model
-        carry = loadCarry()
+        boundDeviceId = model.deviceId
+        carry = loadCarry(deviceId: model.deviceId)
         WatchdogNotifier.requestAuthorization()
         bindLive(model)
         loop?.cancel()
@@ -32,8 +34,16 @@ final class WatchdogService {
 
     func tick(inject: Watchdog.WatchdogInject? = nil, skipForecast: Bool = false) async {
         guard let model else { return }
+        if model.deviceId != boundDeviceId {
+            liveHRRing = []
+            liveRRRing = []
+            lastRRSeq = -1
+            boundDeviceId = model.deviceId
+            carry = loadCarry(deviceId: model.deviceId)
+        }
         captureLive(model)
         let now = Int(Date().timeIntervalSince1970)
+        let liveAlerts = !model.live.backfilling
         let days = model.repo.days
         let promptEvals = model.baseline.watchdogPromptEvaluations(days: days)
         let prompt = UniTSPrompt.from(evaluations: promptEvals)
@@ -65,17 +75,23 @@ final class WatchdogService {
                                        inject: inject,
                                        sleepSessionOpen: sleepOpen,
                                        sleepIntervals: sleepIntervals,
-                                       skipForecast: skipForecast)
+                                       skipForecast: skipForecast,
+                                       liveAlerts: liveAlerts)
         carry = result.carry
-        persistCarry()
+        persistCarry(deviceId: model.deviceId)
         if case .success(let built) = window {
             model.baseline.ingestImu(samples: built.imu, nowUnix: now)
             model.baseline.ingestWatchdogTape(window: built, nowUnix: now,
-                                              lastWorkoutEndUnix: carry.lastWorkoutEndUnix)
+                                              lastWorkoutEndUnix: carry.lastWorkoutEndUnix,
+                                              sleepIntervals: sleepIntervals)
         }
         model.baseline.applyWatchdog(result)
         if result.shouldNotify {
-            WatchdogNotifier.post(result)
+            WatchdogNotifier.post(result) { [weak self] delivery in
+                guard let self else { return }
+                self.carry.notifyDelivery = delivery
+                self.persistCarry(deviceId: model.deviceId)
+            }
         }
     }
 
@@ -226,19 +242,29 @@ final class WatchdogService {
         return off
     }
 
-    private static let carryKey = "noop.watchdog.carry.v1"
+    private static let carryKeyPrefix = "noop.watchdog.carry.v2."
 
-    private func loadCarry() -> WatchdogCarry {
-        guard let data = UserDefaults.standard.data(forKey: Self.carryKey),
-              let decoded = try? JSONDecoder().decode(WatchdogCarry.self, from: data) else {
-            return .empty
-        }
-        return decoded
+    private static func carryKey(deviceId: String) -> String {
+        carryKeyPrefix + deviceId
     }
 
-    private func persistCarry() {
+    private func loadCarry(deviceId: String) -> WatchdogCarry {
+        let defaults = UserDefaults.standard
+        if let data = defaults.data(forKey: Self.carryKey(deviceId: deviceId)),
+           let decoded = try? JSONDecoder().decode(WatchdogCarry.self, from: data) {
+            return decoded
+        }
+        if let legacy = defaults.data(forKey: "noop.watchdog.carry.v1"),
+           let decoded = try? JSONDecoder().decode(WatchdogCarry.self, from: legacy) {
+            defaults.set(legacy, forKey: Self.carryKey(deviceId: deviceId))
+            return decoded
+        }
+        return .empty
+    }
+
+    private func persistCarry(deviceId: String) {
         if let data = try? JSONEncoder().encode(carry) {
-            UserDefaults.standard.set(data, forKey: Self.carryKey)
+            UserDefaults.standard.set(data, forKey: Self.carryKey(deviceId: deviceId))
         }
     }
 }

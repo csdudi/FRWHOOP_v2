@@ -311,16 +311,20 @@ public enum WatchdogNotifyPolicy: Sendable {
                                 safety: Bool, previousSafety: Bool,
                                 fused: Double, previousFused: Double,
                                 recon: Double = 0, previousRecon: Double = 0,
-                                eventLabel: WatchdogEventLabel = .abnormalMultiDirection) -> (Bool, String) {
+                                eventLabel: WatchdogEventLabel = .abnormalMultiDirection,
+                                episodeId: String? = nil,
+                                notifiedSevereEpisodeId: String = "") -> (Bool, String) {
         _ = fused
         _ = previousFused
+        _ = openedEpisode
         let safetyEdge = safety && !previousSafety
         guard severity == .severe || safetyEdge else { return (false, "not-severe") }
-        if openedEpisode && (extremeFamily(eventLabel) || safetyEdge) {
-            return (true, "episode-start")
-        }
         if safetyEdge { return (true, "safety") }
         guard extremeFamily(eventLabel) else { return (false, "not-extreme-family") }
+        let eid = episodeId ?? ""
+        if !eid.isEmpty, notifiedSevereEpisodeId != eid {
+            return (true, "first-severe")
+        }
         if recon >= previousRecon + WatchdogCalibration.escalateDelta {
             return (true, "escalate")
         }
@@ -328,7 +332,15 @@ public enum WatchdogNotifyPolicy: Sendable {
     }
 }
 
-/// One TimesFM (or hold-display) horizon. Early uses this only when `studentOk`.
+/// Bundled Core ML is `student`. `official` is reserved until convert pins exist (none on Friday).
+public enum WatchdogForecastSource: String, Equatable, Sendable, Codable {
+    case student
+    case hold
+    case inject
+    case official
+}
+
+/// One TimesFM (or hold-display) horizon. Wearer Early only when `source == official`.
 public struct WatchdogForecastStep: Equatable, Sendable {
     public var energy: Double
     public var nextHR: [Double]
@@ -339,12 +351,19 @@ public struct WatchdogForecastStep: Equatable, Sendable {
     public var nextSpO2: [Double]
     public var ranStudent: Bool
     public var studentOk: Bool
-    /// official | hold | inject
     public var source: String
+    /// Civil seconds for cube columns 0…4: now+60 … now+300. Not the last observed minutes.
+    public var horizonUnix: [Int]
 
     public static let empty = WatchdogForecastStep(
         energy: 0, nextHR: [], nextHRV: [], nextTemp: [], nextResp: [],
-        nextRHR: [], nextSpO2: [], ranStudent: false, studentOk: false, source: "hold")
+        nextRHR: [], nextSpO2: [], ranStudent: false, studentOk: false, source: "hold",
+        horizonUnix: [])
+
+    public static func horizonUnix(nowUnix: Int) -> [Int] {
+        let h = WatchdogCalibration.forecastHorizon
+        return (1...h).map { nowUnix + $0 * WatchdogConfig.gridSeconds }
+    }
 
     public var cube: [[Double]] {
         [nextHR, nextRHR, nextHRV, nextTemp, nextResp, nextSpO2]
@@ -436,7 +455,7 @@ public struct WatchdogForecastRuntime: Sendable {
         if skipStudent {
             let src = skipForecast
                 ? (carry.lastForecastSource.isEmpty ? "hold" : carry.lastForecastSource)
-                : (carry.lastForecastSource.isEmpty ? "official" : carry.lastForecastSource)
+                : (carry.lastForecastSource.isEmpty ? "student" : carry.lastForecastSource)
             return WatchdogForecastStep(energy: e, nextHR: carry.lastForecastHR, nextHRV: carry.lastForecastHRV,
                                         nextTemp: carry.lastForecastTemp, nextResp: carry.lastForecastResp,
                                         nextRHR: carry.lastForecastRHR, nextSpO2: carry.lastForecastSpO2,
@@ -444,7 +463,8 @@ public struct WatchdogForecastRuntime: Sendable {
                                             && Self.completeCube(carry.lastForecastHR, carry.lastForecastRHR,
                                                                  carry.lastForecastHRV, carry.lastForecastTemp,
                                                                  carry.lastForecastResp, carry.lastForecastSpO2),
-                                        source: src)
+                                        source: src,
+                                        horizonUnix: WatchdogForecastStep.horizonUnix(nowUnix: nowUnix))
         }
 
         func hold(_ hat: [Double?]) -> [Double] {
@@ -481,20 +501,21 @@ public struct WatchdogForecastRuntime: Sendable {
             bases[5] ?? WatchdogPopulationPriors.spo2
         ]
         let predicted: [[Double]]?
-        var predictedSource = "official"
+        var predictedSource = "student"
         if let override = Self.testPredict {
             predicted = override
             predictedSource = "inject"
         } else {
             predicted = TimesFMStudentSession.shared.predict(history: history, prompt: promptVec, occupancy: occ)
-            predictedSource = "official"
+            predictedSource = "student"
         }
         if let forecast = predicted,
            Self.completeCube(forecast) {
             return WatchdogForecastStep(energy: e, nextHR: forecast[0], nextHRV: forecast[2],
                                         nextTemp: forecast[3], nextResp: forecast[4],
                                         nextRHR: forecast[1], nextSpO2: forecast[5],
-                                        ranStudent: true, studentOk: true, source: predictedSource)
+                                        ranStudent: true, studentOk: true, source: predictedSource,
+                                        horizonUnix: WatchdogForecastStep.horizonUnix(nowUnix: nowUnix))
         }
         return WatchdogForecastStep(energy: e, nextHR: hold(residual.reconstructedHR),
                                     nextHRV: hold(residual.reconstructedHRV),
@@ -502,7 +523,8 @@ public struct WatchdogForecastRuntime: Sendable {
                                     nextResp: hold(residual.reconstructedResp),
                                     nextRHR: hold(residual.reconstructedRHR),
                                     nextSpO2: hold(residual.reconstructedSpO2),
-                                    ranStudent: false, studentOk: false, source: "hold")
+                                    ranStudent: false, studentOk: false, source: "hold",
+                                    horizonUnix: WatchdogForecastStep.horizonUnix(nowUnix: nowUnix))
     }
 
     public static func completeCube(_ planes: [[Double]]) -> Bool {
@@ -589,7 +611,8 @@ public struct WatchdogForecastRuntime: Sendable {
 
     public static func wearerEarly(pathJ: Double, allowed: Bool, severity: WatchdogSeverity,
                                    trustPct: Int, persistTicks: Int,
-                                   forecastSource: String = "official") -> Bool {
+                                   forecastSource: String = WatchdogForecastSource.student.rawValue) -> Bool {
+        // Converted official weights only. Student cubes stay shadow (compute, no wearer Early).
         guard forecastSource == "official" || forecastSource == "inject" else { return false }
         guard allowed, severity != .severe, severity != .active else { return false }
         guard trustPct >= earlyTrustFloor else { return false }

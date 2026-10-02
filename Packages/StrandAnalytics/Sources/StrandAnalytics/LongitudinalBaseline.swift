@@ -1173,8 +1173,8 @@ public enum LongitudinalBaseline {
         let todayNative = trainableNative(todayObs, series: series)
         let todayMath = todayNative.flatMap { toMath($0, series: series) }
 
-        let lastOK = lastQualityOKEpoch(byDay: byDay, series: series, through: tEpoch)
-        let stale: Bool = {
+        var lastOK = lastQualityOKEpoch(byDay: byDay, series: series, through: tEpoch, dayLogs: dayLogs)
+        var stale: Bool = {
             guard let lastOK else { return true }
             return tEpoch - lastOK > Params.staleDays
         }()
@@ -1215,9 +1215,6 @@ public enum LongitudinalBaseline {
             lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series)
         }
 
-        let establishedLong = nLong >= nEst
-        let showLong = nLong >= Params.nLongShow && centerLong != nil
-
         let longPairsAll: [(epoch: Int, value: Double)] = longEpochs.compactMap { e in
             guard let x = trainableMath(byDay[e], series: series) else { return nil }
             return (e, x)
@@ -1241,6 +1238,12 @@ public enum LongitudinalBaseline {
                 }
             }
         }
+        if longHeld, let iso = lastLongUpdate, let heldEpoch = isoEpochDay(iso) {
+            lastOK = heldEpoch
+            stale = tEpoch - heldEpoch > Params.staleDays
+        }
+        let establishedLong = nLong >= nEst
+        let showLong = nLong >= Params.nLongShow && centerLong != nil
         let slopePairs = Array(longPairs.suffix(slopeFitNights))
         let slope: Double? = theilSenSlope(xs: slopePairs.map { Double($0.epoch) },
                                            ys: slopePairs.map(\.value))
@@ -1289,6 +1292,10 @@ public enum LongitudinalBaseline {
             spreadLong = heldS
             nLong = max(nLong, carry.nLong)
             longHeld = true
+            if let iso = lastLongUpdate, let heldEpoch = isoEpochDay(iso) {
+                lastOK = heldEpoch
+                stale = tEpoch - heldEpoch > Params.staleDays
+            }
         }
 
         let expectedToday: Double? = centerLong.map {
@@ -1697,8 +1704,11 @@ public enum LongitudinalBaseline {
         return nil
     }
 
-    static func lastQualityOKEpoch(byDay: [Int: LBDailyObservation], series: LBSeries, through t: Int) -> Int? {
-        byDay.keys.filter { $0 <= t && trainableMath(byDay[$0], series: series) != nil }.max()
+    static func lastQualityOKEpoch(byDay: [Int: LBDailyObservation], series: LBSeries, through t: Int,
+                                  dayLogs: [String: LBDayLog] = [:]) -> Int? {
+        byDay.keys.filter {
+            $0 <= t && trainableMath(byDay[$0], series: series) != nil && nightIsClean($0, dayLogs: dayLogs)
+        }.max()
     }
 
     static func clipPct(_ x: Double) -> Int {

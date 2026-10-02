@@ -262,7 +262,7 @@ public enum WatchdogBand: Sendable {
     }
 
     public static func shouldCountMinute(nowUnix: Int, lastUnix: Int) -> Bool {
-        lastUnix <= 0 || nowUnix - lastUnix >= minuteSeconds
+        lastUnix <= 0 || nowUnix / minuteSeconds > lastUnix / minuteSeconds
     }
 
     public static func update(absResidual: [Double], eligible: Bool,
@@ -316,15 +316,17 @@ public enum WatchdogBand: Sendable {
             }
             nPresent[k] += 1
         }
-        let matured = (0..<6).contains { nPresent[$0] >= firstMinutes }
-        if !initialized && matured {
-            for k in 0..<6 {
-                anchor[k] = max(q[k], qFloor)
-                scale[k] = 1
+        var anyReady = initialized
+        for k in 0..<6 {
+            if nPresent[k] >= firstMinutes {
+                if anchor[k] <= qFloor + 1e-12, q[k] > 0 {
+                    anchor[k] = max(q[k], qFloor)
+                    scale[k] = 1
+                }
+                anyReady = true
             }
-            initialized = true
-            return scale
         }
+        initialized = anyReady
         guard initialized else { return scale }
         for k in 0..<6 {
             guard nPresent[k] >= firstMinutes else { continue }

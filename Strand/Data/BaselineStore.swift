@@ -81,7 +81,8 @@ final class BaselineStore: ObservableObject {
     private let confoundersKey = "noop.baseline.confounders.v1"
     private let dayLogsKey = "noop.baseline.daylog.v1"
     private let imuKey = "noop.baseline.imu.v1"
-    private let tapeKey = "noop.baseline.daytape.v1"
+    private let tapeKey = "noop.baseline.daytape.v2"
+    private let tapeKeyLegacy = "noop.baseline.daytape.v1"
     private let dismissedPromptKey = "noop.baseline.dismissedPrompt.v1"
 
     init(defaults: UserDefaults = .standard, asOf: String? = nil, resetCourse: Bool = false) {
@@ -98,6 +99,7 @@ final class BaselineStore: ObservableObject {
             defaults.removeObject(forKey: dayLogsKey)
             defaults.removeObject(forKey: imuKey)
             defaults.removeObject(forKey: tapeKey)
+            defaults.removeObject(forKey: tapeKeyLegacy)
             defaults.removeObject(forKey: dismissedPromptKey)
             for series in LBSeries.allCases {
                 defaults.removeObject(forKey: freezeKeyPrefix + series.rawValue)
@@ -166,7 +168,7 @@ final class BaselineStore: ObservableObject {
         ]
         return needed.map { series in
             LongitudinalBaseline.evaluate(
-                asOf: asOf,
+                asOf: Self.livePromptAsOf(days: days),
                 series: series,
                 observations: observations(from: days, series: series),
                 trial: LBTrialRequest(dayLogsByDay: dayLogsByDay))
@@ -190,10 +192,12 @@ final class BaselineStore: ObservableObject {
     }
 
     /// Unique-minute stub series from the same window Watchdog scored. Does not write Layer 1 snapshots.
-    func ingestWatchdogTape(window: WatchdogWindow, nowUnix: Int, lastWorkoutEndUnix: Int) {
+    func ingestWatchdogTape(window: WatchdogWindow, nowUnix: Int, lastWorkoutEndUnix: Int,
+                             sleepIntervals: [WatchdogSleepInterval] = []) {
         let day = Self.dayKey(Date(timeIntervalSince1970: TimeInterval(nowUnix)))
         var tape = dayTapeByDay[day] ?? LBDayTape(day: day)
-        guard tape.ingest(window: window, nowUnix: nowUnix, lastWorkoutEndUnix: lastWorkoutEndUnix) else { return }
+        guard tape.ingest(window: window, nowUnix: nowUnix, lastWorkoutEndUnix: lastWorkoutEndUnix,
+                          sleepIntervals: sleepIntervals) else { return }
         dayTapeByDay[day] = tape
         if nowUnix - tapeLastPersistUnix >= 60 {
             persistDayTape()
@@ -835,9 +839,25 @@ final class BaselineStore: ObservableObject {
         return Dictionary(uniqueKeysWithValues: rows.map { ($0.day, $0) })
     }
 
+    /// Live UniTS prompt uses last completed civil day, not the Baseline calendar swipe.
+    static func livePromptAsOf(days: [DailyMetric]) -> String {
+        let today = dayKey(Date())
+        let yesterday = yesterdayKey()
+        if let newest = days.map(\.day).filter({ $0 < today }).max() {
+            return newest
+        }
+        return yesterday
+    }
+
     private static func loadDayTape(defaults: UserDefaults) -> [String: LBDayTape] {
+        if let data = defaults.data(forKey: "noop.baseline.daytape.v2"),
+           var rows = try? JSONDecoder().decode([LBDayTape].self, from: data) {
+            for i in rows.indices { rows[i].migrateHrvFromLnIfNeeded() }
+            return Dictionary(uniqueKeysWithValues: rows.map { ($0.day, $0) })
+        }
         guard let data = defaults.data(forKey: "noop.baseline.daytape.v1"),
-              let rows = try? JSONDecoder().decode([LBDayTape].self, from: data) else { return [:] }
+              var rows = try? JSONDecoder().decode([LBDayTape].self, from: data) else { return [:] }
+        for i in rows.indices { rows[i].migrateHrvFromLnIfNeeded() }
         return Dictionary(uniqueKeysWithValues: rows.map { ($0.day, $0) })
     }
 
