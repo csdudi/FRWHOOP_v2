@@ -68,9 +68,11 @@ final class WatchdogV39OfficialPathTests: XCTestCase {
         XCTAssertFalse(WatchdogForecastRuntime.wearerEarly(
             pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 80, persistTicks: 2,
             forecastSource: "student"))
-        XCTAssertTrue(WatchdogForecastRuntime.wearerEarly(
+        XCTAssertFalse(WatchdogForecastRuntime.officialConvertReady)
+        XCTAssertFalse(WatchdogForecastRuntime.wearerEarly(
             pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 80, persistTicks: 2,
             forecastSource: "official"))
+        XCTAssertEqual(WatchdogForecastRuntime.publishedSource("official"), "student")
     }
 
     func testInjectForecastSourceAndRing() throws {

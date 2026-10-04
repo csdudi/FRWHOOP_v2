@@ -343,7 +343,7 @@ public struct UniTSRuntime: Sendable {
         ]
     }
 
-    /// 1 = measured minute. Fed to Core ML when the graph has a mask input; student graphs use occupancy + prompt fill.
+    /// 1 = measured minute. Required on student Core ML (`present_mask`); holes stay prompt-filled.
     static func packPresentMask(_ window: WatchdogWindow) -> [[Double]] {
         func mask(_ xs: [Double?]) -> [Double] {
             (0..<WatchdogConfig.seqLen).map { i in

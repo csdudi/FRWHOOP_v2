@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Export official Harvard UniTS into Watchdog Core ML I/O.
+"""Official Harvard UniTS → Watchdog Core ML (DEFERRED).
 
-TimesFM stays the local student (TimesFM3_Student). TimesFM 3.0 weights are
-not converted. UniTS uses mims-harvard units_x32_pretrain (MIT).
+Does not replace shipped student packages unless WATCHDOG_OFFICIAL_CONVERT=1.
+TimesFM 3.0 weights are never converted. Until this lands, the phone loads
+UniTS_AD / TimesFM3_Student and wearer Early stays shadow.
 
     Tools/units-watchdog/.venv/bin/python Tools/units-watchdog/export_official_coreml.py
 
@@ -11,6 +12,7 @@ Never train on the phone.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import sys
 import types
@@ -356,7 +358,16 @@ def convert(wrapper, dest: Path) -> None:
 
 def main() -> int:
     print(
-        "Official Watchdog export:\n"
+        "Official Watchdog convert is DEFERRED.\n"
+        "  Shipped graphs stay students (UniTS_AD, TimesFM3_Student).\n"
+        "  Wearer Early stays shadow. TimesFM 3.0 must not ship.\n"
+        "  Set WATCHDOG_OFFICIAL_CONVERT=1 only to attempt Core ML (does not flip official labels)."
+    )
+    if os.environ.get("WATCHDOG_OFFICIAL_CONVERT") != "1":
+        print("exit 0 — student packages not overwritten")
+        return 0
+    print(
+        "Attempting convert (will not change forecastSource to official):\n"
         "  UniTS  = mims-harvard units_x32_pretrain (MIT)\n"
         "  TimesFM = keep TimesFM3_Student (not 3.0 weights)"
     )

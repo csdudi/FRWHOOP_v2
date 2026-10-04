@@ -30,7 +30,7 @@ These are the live-engine rules from leftover close-out 1–10. Charge is not re
 | 7 | Safety is last still-rest **extrema** (HR max/min, not the minute mean). An out-of-band RMSSD is kept; a 3-tap median must not erase it. Duration is held across thin / UniTS-fail ticks. Wrist-off stays unavailable. |
 | 8 | First severe of an episode pages once. Persist and recovery advance on a **new valid observation minute**, not 20 s ticks or a held pair in a new wall minute. Missing data pauses recovery and does not resolve. Escalate needs a larger jump **and** 30 quiet minutes. |
 | 9 | Live **Off** = `severity ≥ candidate` or safety or personal-off. It is not Layer 1 HOW OFF and not “last point outside the painted band.” Sparse C is fresh minutes / 30, never 1.0 from one pair. Thresholds stay `prior-untuned`. |
-| 10 | Bundled graphs are **students** (`units-ad-coreml-v3` / `timesfm3-student-v3`). Not labelled official. Official UniTS / TimesFM 2.5 convert is deferred; TimesFM 3.0 must not ship. Wearer Early is shadow. `present_mask` (1 = measured) is required. A held forecast cube keeps emit clocks `now+60…now+300`; backcast scores those minutes. |
+| 10 | Bundled graphs are **students** (`units-ad-coreml-v3` / `timesfm3-student-v3`). Outputs are never labelled official (`publishedSource` remaps `official` → `student` while `officialConvertReady` is false). Official UniTS / TimesFM 2.5 convert is **deferred** (`export_official_coreml.py` does not overwrite packages). TimesFM 3.0 must not ship. Wearer Early is shadow (student / hold / unfinished official). `present_mask` is a required Core ML input (1 = measured). A held forecast cube keeps emit clocks `now+60…now+300`; backcast scores those minutes. |
 
 ## Loop (on the phone)
 
@@ -124,5 +124,5 @@ Live Watchdog only uses **30 minutes in** and **5 minutes out**, plus σ floors 
 | Notify | `Strand/Watchdog/WatchdogNotifier.swift` (queued / sent / failed) |
 | Background tick | `Strand/Watchdog/WatchdogBackgroundScheduler.swift` (cancel on expire) |
 | Day-tape ingest | `LBDayTape.swift` via `BaselineStore` |
-| Official convert (not yet replacing packages) | `Tools/units-watchdog/export_official_coreml.py` |
+| Official convert (**deferred**; does not overwrite students) | `Tools/units-watchdog/export_official_coreml.py` |
 | Pins | `Packages/StrandAnalytics/Baseline/units/`, `WatchdogV40CloseoutTests`, `WatchdogStatisticsContractTests` |
