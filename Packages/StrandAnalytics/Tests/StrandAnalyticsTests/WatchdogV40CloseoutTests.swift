@@ -276,6 +276,21 @@ final class WatchdogV40CloseoutTests: XCTestCase {
         XCTAssertLessThan(state.nPresent[3], WatchdogBand.firstMinutes)
     }
 
+    func testBandCountsNewChannelInSameWallMinute() {
+        var state = WatchdogBandState.empty
+        let now = 20_000
+        _ = WatchdogBand.update(&state, absResidual: [0.2, 0, 0, 0, 0, 0], eligible: true,
+                                nowUnix: now, present: [true, false, false, false, false, false],
+                                sampleMinute: [now, 0, 0, 0, 0, 0])
+        XCTAssertEqual(state.nPresent[0], 1)
+        XCTAssertEqual(state.nPresent[3], 0)
+        _ = WatchdogBand.update(&state, absResidual: [0.2, 0, 0, 0.2, 0, 0], eligible: true,
+                                nowUnix: now + 20, present: [true, false, false, true, false, false],
+                                sampleMinute: [now, 0, 0, now, 0, 0])
+        XCTAssertEqual(state.nPresent[0], 1)
+        XCTAssertEqual(state.nPresent[3], 1)
+    }
+
     func testBandDoesNotCountSameCivilMinuteTwice() {
         var q = Array(repeating: 0.25, count: 6)
         var anchor = Array(repeating: 1.0, count: 6)

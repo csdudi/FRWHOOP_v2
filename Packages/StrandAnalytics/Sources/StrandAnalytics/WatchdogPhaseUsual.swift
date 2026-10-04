@@ -337,7 +337,9 @@ public enum WatchdogBand: Sendable {
         if lastMinute.count < 6 { lastMinute += Array(repeating: 0, count: 6 - lastMinute.count) }
         guard eligible, absResidual.count >= 6 else { return scale }
         if absResidual.contains(where: { $0 >= residualCap }) { return scale }
-        if nowUnix > 0, !shouldCountMinute(nowUnix: nowUnix, lastUnix: lastUnix) { return scale }
+        // Wall-clock gate only when we have no measurement identities.
+        if nowUnix > 0, sampleMinute == nil,
+           !shouldCountMinute(nowUnix: nowUnix, lastUnix: lastUnix) { return scale }
         let mask = present ?? Array(repeating: true, count: 6)
         guard mask.contains(true) else { return scale }
         if nowUnix > 0, let samples = sampleMinute {

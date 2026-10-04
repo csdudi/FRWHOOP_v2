@@ -88,6 +88,11 @@ public struct LBDayTape: Equatable, Sendable, Codable {
             } else if occ < 0.15, !recovering {
                 changed = restHR.addUnique(value: v, minuteUnix: t) || changed
             }
+            if !sleepNow, (occ >= 0.15 || loco >= 0.5), t > lastActiveMinute {
+                activeMinutes += 1
+                lastActiveMinute = t
+                changed = true
+            }
         }
         if let (v, t, i) = lastFresh(window.hrv, channel: 2) {
             let sleepNow = sleepAt(minuteUnix: t, row: i)
@@ -117,19 +122,6 @@ public struct LBDayTape: Equatable, Sendable, Codable {
                 changed = effortSpO2.addUnique(value: v, minuteUnix: t) || changed
             } else if !sleepNow, occ < 0.15, !recovering {
                 changed = restSpO2.addUnique(value: v, minuteUnix: t) || changed
-            }
-        }
-        let lastRow = features.last ?? []
-        let lastMinute = nowUnix - (nowUnix % 60)
-        let lastSleep = sleepAt(minuteUnix: lastMinute, row: max(0, features.count - 1))
-        let occ = lastRow.isEmpty ? 0 : WatchdogActivityFeatures.priorOccupancy(lastRow)
-        let loco = lastRow.isEmpty ? 0 : WatchdogActivityFeatures.stepLocomotion(lastRow)
-        if !lastSleep, (occ >= 0.15 || loco >= 0.5), nowUnix > lastActiveMinute {
-            let minute = nowUnix - (nowUnix % 60)
-            if minute > lastActiveMinute {
-                activeMinutes += 1
-                lastActiveMinute = minute
-                changed = true
             }
         }
         return changed

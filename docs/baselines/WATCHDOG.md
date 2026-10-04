@@ -22,7 +22,7 @@ These are the live-engine rules from leftover close-out 1–10. Charge is not re
 | # | Rule |
 |---|---|
 | 1 | Day-tape HRV is **native RMSSD ms**. Layer 1 `toMath` is the only ln. Leftover ln buckets migrate once (`daytape.v2`). |
-| 2 | Counts use the **measurement civil minute** of that channel. Re-reading a window, or holding one sparse temp while the wall clock moves, does not raise tape / band / sidecar `n`. |
+| 2 | Counts use the **measurement civil minute** of that channel. Re-reading a window, or holding one sparse temp while the wall clock moves, does not raise tape / band / sidecar `n`. A new measurement in the same wall minute still counts; `sessionAbs` and tape `activeMinutes` ignore held / tick-only minutes. |
 | 3 | Sleep minutes never train `awakeRest*`. Band, sidecar, tape, and IMU learn only when `shouldTrainUsual` is true (quality ok, not confounded, not candidate/active/severe). Yesterday’s confounder applies only while last night’s sleep is still open. Detection still runs. |
 | 4 | Each vital has its own seed, `nPresent`, ready (≥ 14 **that** channel), and first-day sidecar. Missing temp is not 0 and does not inherit HR ready. |
 | 5 | Layer 1 last-OK / last-update use **clean, habit-matched** nights. Illness does not refresh freshness. |

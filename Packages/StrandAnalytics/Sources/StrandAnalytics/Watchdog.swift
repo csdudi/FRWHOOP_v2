@@ -936,7 +936,6 @@ public enum Watchdog {
             && presentMax < WatchdogBand.residualCap && !confounded && !recovering
             && !personalOff
             && severity != .candidate && severity != .active && severity != .severe
-            && WatchdogBand.shouldCountMinute(nowUnix: nowUnix, lastUnix: carry.sessionLastUnix)
         if sessionElig {
             if carry.sessionAbs.count < 6 { carry.sessionAbs = Array(repeating: 0, count: 6) }
             if carry.sessionNative.count < 6 { carry.sessionNative = Array(repeating: 0, count: 6) }
@@ -944,12 +943,14 @@ public enum Watchdog {
             let a = 0.12
             if carry.lastNativeMinute.count < 6 { carry.lastNativeMinute = Array(repeating: 0, count: 6) }
             let priorMinute = carry.lastNativeMinute
+            let series: [[Double?]] = [window.hr, window.rhr, window.hrv, window.temp, window.resp, window.spo2]
             for k in 0..<6 where present[k] {
+                let minute = WatchdogQuality.lastFiniteMinuteUnix(series[k], startUnix: window.startUnix) ?? 0
+                guard minute > carry.lastNativeMinute[k] else { continue }
                 carry.sessionAbs[k] = (1 - a) * carry.sessionAbs[k] + a * absR[k]
             }
             let nativeObs: [Double?] = [lastHR?.obs, lastRHR?.obs, lastHRV?.obs,
                                         lastTemp?.obs, lastResp?.obs, lastSpO2?.obs]
-            let series: [[Double?]] = [window.hr, window.rhr, window.hrv, window.temp, window.resp, window.spo2]
             for k in 0..<6 {
                 guard let obs = nativeObs[k], obs.isFinite else { continue }
                 let minute = WatchdogQuality.lastFiniteMinuteUnix(series[k], startUnix: window.startUnix) ?? 0
