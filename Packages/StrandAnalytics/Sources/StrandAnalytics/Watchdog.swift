@@ -765,7 +765,7 @@ public enum Watchdog {
         carry.lastEventLabel = decision.label.rawValue
         carry.lastActivityFamily = famName
         carry.lastForecastJoint = forecastLabelJ
-        carry.lastForecastSource = WatchdogForecastRuntime.publishedSource(forecast.source)
+        carry.lastForecastSource = forecast.source
         if forecast.source == "student" || forecast.source == "inject" {
             carry.forecastJRing.append(forecastLabelJ)
             if carry.forecastJRing.count > 30 {
@@ -1088,7 +1088,7 @@ public enum Watchdog {
             severity: severity,
             trustPct: pageTrust,
             persistTicks: carry.earlyTicks,
-            forecastSource: WatchdogForecastRuntime.publishedSource(forecast.source))
+            forecastSource: forecast.source)
 
         let civil = Self.civilDay(nowUnix)
         if carry.lastCivilDay.isEmpty { carry.lastCivilDay = civil }
@@ -1178,7 +1178,7 @@ public enum Watchdog {
             calibrationSource: WatchdogCalibration.version,
             cutReason: decision.cutReason,
             eventExplained: decision.explained,
-            forecastSource: WatchdogForecastRuntime.publishedSource(forecast.source),
+            forecastSource: forecast.source,
             liveOff: liveOff(severity: severity, safety: safety, personalOff: personalOff),
             personalOff: personalOff
         )

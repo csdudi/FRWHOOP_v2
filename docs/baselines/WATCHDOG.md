@@ -30,7 +30,7 @@ These are the live-engine rules from leftover close-out 1–10. Charge is not re
 | 7 | Safety is last still-rest **extrema** (HR max/min, not the minute mean). An out-of-band RMSSD is kept; a 3-tap median must not erase it. Duration is held across thin / UniTS-fail ticks. Wrist-off stays unavailable. |
 | 8 | First severe of an episode pages once. Persist and recovery advance on a **new valid observation minute**, not 20 s ticks or a held pair in a new wall minute. Missing data pauses recovery and does not resolve. Escalate needs a larger jump **and** 30 quiet minutes. |
 | 9 | Live **Off** = `severity ≥ candidate` or safety or personal-off. It is not Layer 1 HOW OFF and not “last point outside the painted band.” Sparse C is fresh minutes / 30, never 1.0 from one pair. Thresholds stay `prior-untuned`. |
-| 10 | Bundled graphs are **students** (`units-ad-coreml-v3` / `timesfm3-student-v3`). Outputs are never labelled official (`publishedSource` remaps `official` → `student` while `officialConvertReady` is false). Official UniTS / TimesFM 2.5 convert is **deferred** (`export_official_coreml.py` does not overwrite packages). TimesFM 3.0 must not ship. Wearer Early is shadow (student / hold / unfinished official). `present_mask` is a required Core ML input (1 = measured). A held forecast cube keeps emit clocks `now+60…now+300`; backcast scores those minutes. |
+| 10 | Bundled graphs are **students** (`units-ad-coreml-v3` / `timesfm3-student-v3`). Not labelled official. Official Harvard UniTS / TimesFM 2.5 cannot ship today (Core ML convert fails; TimesFM 3.0 is license-banned). Wearer Early is shadow for student / hold. `present_mask` is a required Core ML input (1 = measured). A held forecast cube keeps emit clocks `now+60…now+300`; backcast scores those minutes. |
 
 ## Loop (on the phone)
 
@@ -42,7 +42,7 @@ These are the live-engine rules from leftover close-out 1–10. Charge is not re
 4. **Prompt** — UniTS / the Swift prior reconstruct this half-hour first. A shown Layer 1 usual (HR ≠ RHR) and a mature phase×activity sidecar may *tighten* that prompt. They do not block the short-term call. `evaluate` never writes 7-day / 60-day snapshots.
 5. **UniTS reconstruct** — dotted expected line and predicted range for HR, RHR, HRV, temp, breathing, SpO₂. That corridor **is** the short-term baseline (model σ, not Layer 1 MAD).
 6. **Direction** — two scores. Tanh `joint` decides “UniTS explained this strip” (workout names). Clip-sum `severityJoint` (RHR out, each \|r\| capped at 1) decides severe. If severity is severe, the name cannot stay `normal_*`.
-7. **TimesFM** — at most once a minute (`forecastSource`: **student** / hold / test inject). Official **weights** we intend are TimesFM **2.5-200m** (Apache-2.0); that convert is **deferred**. Bundled graphs are students — not labelled official. Wearer Early is **shadow** until official convert. TimesFM **3.0** must not ship. Cannot severe-notify. Background ticks may skip TimesFM and still run UniTS + safety. A held cube keeps the **emit** target times (`now+60…now+300`); backcast scores those minutes, not the last five present samples. Missing minutes are a present-mask (and occupancy + prompt fill on the student graphs).
+7. **TimesFM** — at most once a minute (`forecastSource`: **student** / hold / test inject). Bundled graphs are students — not labelled official. Wearer Early is **shadow**. Official Harvard UniTS / TimesFM 2.5 cannot ship today (Core ML convert fails; 2.5 is ~925 MB univariate). TimesFM **3.0** must not ship. Cannot severe-notify. Background ticks may skip TimesFM and still run UniTS + safety. A held cube keeps the **emit** target times (`now+60…now+300`); backcast scores those minutes, not the last five present samples. Missing minutes are a present-mask (and occupancy + prompt fill on the student graphs).
 8. **Confounders** — felt-ill / extra med **today** (calendar day, not Layer 1 `asOf`) stops still-band and rest-tape learning. Models still draw. Open sleep may still use yesterday’s log. Live UniTS prompt `asOf` is **calendar yesterday** (newest scored night ≤ today), not the Baseline calendar swipe.
 9. **Green band** — small σ updates on the current phase×activity key after 14 **present** minutes of that channel (still/sleep, or a held workout family). A walk key does not write the still key. Post-workout is not learnable. The same **civil minute** does not increment `n`. Band and sidecar **do not learn** while severity is candidate/active/severe or Layer 1 **personal-off**. Personal-off is last fresh HR / HRV vs the **logged felt-ill / treatment freeze or 60-day** matching usual — not the walking 7-day, not the UniTS hat. A quiet hat with a sustained personal-off is still **candidate**.
 10. **Safety** — still-wrist extrema can page only if that channel is **fresh**, including when coverage is incomplete. Historical backfill and `liveAlerts: false` cannot `shouldNotify`.
@@ -105,11 +105,11 @@ First card on **Baseline**: each vital in its own block — live value, predicte
 
 | File | Job |
 |---|---|
-| `UniTS_AD.mlpackage` | Reconstruct this 30-minute strip. Target: official mims-harvard UniTS pretrained (`units_x32_pretrain`). Export: `Tools/units-watchdog/export_official_coreml.py`. |
-| `TimesFM3_Student.mlpackage` | Forecast cube until TimesFM **2.5-200m** Core ML convert lands (not TimesFM 3.0 — production-banned). |
+| `UniTS_AD.mlpackage` | Student reconstruct. Official Harvard UniTS cannot convert to this I/O yet (`aten::Int` / `unfold`). |
+| `TimesFM3_Student.mlpackage` | Student 5-min forecast (not TimesFM 3.0 — production-banned; 2.5-200m not converted). |
 | Swift prior | Fallback if Core ML cannot load |
 
-TimesFM 3.0 official weights are licensed `timesfm-non-commercial-license-v1.0` and **cannot** go in a production app. The official TimesFM this repo will convert is **2.5-200m** (Apache-2.0). Official UniTS is the mims-harvard pretrained ckpt, converted to the same 30×6 I/O. Until that convert replaces the packages, the phone loads the bundled student graphs (or the Swift prior). Version strings stay `units-ad-coreml-v3` / `timesfm3-student-v3` so isolation hashes stay honest. Both students take `present_mask` (1 = measured). TimesFM student is trained on the next five minutes, not a copy of now.
+TimesFM 3.0 official weights are licensed `timesfm-non-commercial-license-v1.0` and **cannot** go in a production app. Official TimesFM 2.5-200m is Apache-2.0 but has no 30×6 Core ML graph. Official UniTS PyTorch probe works; `coremltools` fails on `DynamicLinear` / `unfold` / `aten::Int`. The phone loads the bundled students (or the Swift prior). Version strings stay `units-ad-coreml-v3` / `timesfm3-student-v3`. Both students take `present_mask` (1 = measured). TimesFM student is trained on the next five minutes, not a copy of now.
 
 Live Watchdog only uses **30 minutes in** and **5 minutes out**, plus σ floors and a clipped `J`. On that strip, 2.5 vs 3.0 is a small hat difference. The large jump is formula-student → official 2.5 / official UniTS. Early (“looking ahead”) needs a real forecast cube (`forecastSource` official; inject is tests only). A hold cube cannot Early.
 
@@ -124,5 +124,5 @@ Live Watchdog only uses **30 minutes in** and **5 minutes out**, plus σ floors 
 | Notify | `Strand/Watchdog/WatchdogNotifier.swift` (queued / sent / failed) |
 | Background tick | `Strand/Watchdog/WatchdogBackgroundScheduler.swift` (cancel on expire) |
 | Day-tape ingest | `LBDayTape.swift` via `BaselineStore` |
-| Official convert (**deferred**; does not overwrite students) | `Tools/units-watchdog/export_official_coreml.py` |
+| Official convert attempt (fails; does not overwrite students) | `Tools/units-watchdog/export_official_coreml.py` |
 | Pins | `Packages/StrandAnalytics/Baseline/units/`, `WatchdogV40CloseoutTests`, `WatchdogStatisticsContractTests` |

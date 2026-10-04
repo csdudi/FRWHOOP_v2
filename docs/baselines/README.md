@@ -2,7 +2,7 @@
 
 This fork’s product work is **personal baselines on the device**. Charge, Layer 1, and Watchdog are three separate engines. They share the strap’s raw samples. They do **not** share usuals, green ranges, or TRUST scores. They are never averaged.
 
-Watchdog never writes Layer 1. Layer 1 never scores the last 30 minutes. Neither path infers a treatment start from heart rate or names a drug. Charge / Recovery stay on their own engines. Illness nights do not refresh Layer 1 “last OK.” A **logged felt-ill** may snapshot when-well copies for Watchdog personal-off; only a **logged treatment start** restarts the long Layer 1 path. Watchdog learning freezes while an episode or personal-off is open. Live **Off** is Watchdog candidate/safety/personal-off, not Layer 1 HOW OFF. Bundled graphs are **students** with a required present-mask and a true 5-minute forecast; official TimesFM 2.5 / UniTS convert is deferred. TimesFM 3.0 must not ship.
+Watchdog never writes Layer 1. Layer 1 never scores the last 30 minutes. Neither path infers a treatment start from heart rate or names a drug. Charge / Recovery stay on their own engines. Illness nights do not refresh Layer 1 “last OK.” A **logged felt-ill** may snapshot when-well copies for Watchdog personal-off; only a **logged treatment start** restarts the long Layer 1 path. Watchdog learning freezes while an episode or personal-off is open. Live **Off** is Watchdog candidate/safety/personal-off, not Layer 1 HOW OFF. Bundled graphs are **students** with a required present-mask and a true 5-minute forecast. Official Harvard UniTS and TimesFM 2.5 cannot ship on the phone today (see the 4 Oct log). TimesFM 3.0 must not ship.
 
 | Engine | Question | Window | Usual / range | Code |
 |---|---|---|---|---|

@@ -339,8 +339,7 @@ public enum WatchdogNotifyPolicy: Sendable {
     }
 }
 
-/// Bundled Core ML is `student`. `official` is reserved until convert pins exist.
-/// Until `officialConvertReady`, wearer Early stays shadow even if a string says official.
+/// Bundled Core ML is `student`. `official` is unused — convert is not on the phone.
 public enum WatchdogForecastSource: String, Equatable, Sendable, Codable {
     case student
     case hold
@@ -411,16 +410,6 @@ public struct WatchdogForecastRuntime: Sendable {
     static var testPredict: [[Double]]??
 
     public static let earlyTrustFloor = 35
-    /// Official UniTS / TimesFM 2.5 convert has not replaced the student packages.
-    public static let officialConvertReady = false
-
-    /// Never label a student cube official. `inject` is tests only.
-    public static func publishedSource(_ source: String) -> String {
-        if source == WatchdogForecastSource.official.rawValue, !officialConvertReady {
-            return WatchdogForecastSource.student.rawValue
-        }
-        return source
-    }
 
     public func step(window: WatchdogWindow, residual: UniTSResidual,
                      prompt: UniTSPrompt = UniTSPrompt(),
@@ -460,10 +449,9 @@ public struct WatchdogForecastRuntime: Sendable {
         }
 
         if skipStudent {
-            let raw = skipForecast
+            let src = skipForecast
                 ? (carry.lastForecastSource.isEmpty ? "hold" : carry.lastForecastSource)
                 : (carry.lastForecastSource.isEmpty ? "student" : carry.lastForecastSource)
-            let src = Self.publishedSource(raw)
             return WatchdogForecastStep(energy: e, nextHR: carry.lastForecastHR, nextHRV: carry.lastForecastHRV,
                                         nextTemp: carry.lastForecastTemp, nextResp: carry.lastForecastResp,
                                         nextRHR: carry.lastForecastRHR, nextSpO2: carry.lastForecastSpO2,
@@ -650,10 +638,9 @@ public struct WatchdogForecastRuntime: Sendable {
     public static func wearerEarly(pathJ: Double, allowed: Bool, severity: WatchdogSeverity,
                                    trustPct: Int, persistTicks: Int,
                                    forecastSource: String = WatchdogForecastSource.student.rawValue) -> Bool {
-        // Students / hold stay shadow. Official Early waits on convert. Inject is tests.
-        let source = publishedSource(forecastSource)
-        guard source == WatchdogForecastSource.official.rawValue
-                || source == WatchdogForecastSource.inject.rawValue else { return false }
+        // Student / hold cubes stay shadow. Inject is tests only. Official is unused.
+        guard forecastSource == WatchdogForecastSource.official.rawValue
+                || forecastSource == WatchdogForecastSource.inject.rawValue else { return false }
         guard allowed, severity != .severe, severity != .active else { return false }
         guard trustPct >= earlyTrustFloor else { return false }
         return pathJ >= WatchdogCalibration.tNote && persistTicks >= WatchdogCalibration.persistTicks

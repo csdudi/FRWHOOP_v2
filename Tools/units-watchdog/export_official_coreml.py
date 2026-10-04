@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Official Harvard UniTS → Watchdog Core ML (DEFERRED).
+"""Attempt official Harvard UniTS → Core ML (does not ship; convert fails).
 
-Does not replace shipped student packages unless WATCHDOG_OFFICIAL_CONVERT=1.
-TimesFM 3.0 weights are never converted. Until this lands, the phone loads
-UniTS_AD / TimesFM3_Student and wearer Early stays shadow.
+Writes a probe artifact under .official-ckpts only. Never overwrites
+UniTS_AD.mlpackage / TimesFM3_Student. TimesFM 3.0 weights are not converted.
 
     Tools/units-watchdog/.venv/bin/python Tools/units-watchdog/export_official_coreml.py
 
@@ -11,8 +10,6 @@ Never train on the phone.
 """
 from __future__ import annotations
 
-import hashlib
-import os
 import shutil
 import sys
 import types
@@ -26,26 +23,13 @@ UNITS_CKPT = (
     "units_x32_pretrain_checkpoint.pth"
 )
 
-ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 CACHE = HERE / ".official-ckpts"
 VENDOR = HERE / "vendor"
-PKG = ROOT / "Packages/StrandAnalytics/Sources/StrandAnalytics/Resources"
-APP = ROOT / "Strand/Resources/Watchdog"
-PIN = ROOT / "Packages/StrandAnalytics/Baseline/units"
 
 FLOORS = [5.0, 5.0, 8.0, 0.35, 3.0, 2.0]
 LO = [35.0, 35.0, 8.0, 28.0, 6.0, 88.0]
 HI = [190.0, 120.0, 250.0, 38.0, 30.0, 100.0]
-
-
-def pin_sha(pkg: Path, name: str) -> None:
-    weights = pkg / "Data" / "com.apple.CoreML" / "weights" / "weight.bin"
-    src = weights if weights.exists() else pkg / "Manifest.json"
-    sha = hashlib.sha256(src.read_bytes()).hexdigest()
-    PIN.mkdir(parents=True, exist_ok=True)
-    (PIN / name).write_text(sha + "  " + src.name + "\n")
-    print("sha256", name, sha)
 
 
 def download(url: str, dest: Path) -> Path:
@@ -358,18 +342,9 @@ def convert(wrapper, dest: Path) -> None:
 
 def main() -> int:
     print(
-        "Official Watchdog convert is DEFERRED.\n"
-        "  Shipped graphs stay students (UniTS_AD, TimesFM3_Student).\n"
-        "  Wearer Early stays shadow. TimesFM 3.0 must not ship.\n"
-        "  Set WATCHDOG_OFFICIAL_CONVERT=1 only to attempt Core ML (does not flip official labels)."
-    )
-    if os.environ.get("WATCHDOG_OFFICIAL_CONVERT") != "1":
-        print("exit 0 — student packages not overwritten")
-        return 0
-    print(
-        "Attempting convert (will not change forecastSource to official):\n"
+        "Official UniTS Core ML convert (probe only; students stay shipped):\n"
         "  UniTS  = mims-harvard units_x32_pretrain (MIT)\n"
-        "  TimesFM = keep TimesFM3_Student (not 3.0 weights)"
+        "  TimesFM 3.0 weights are not converted"
     )
     try:
         import coremltools as ct  # noqa: F401
@@ -399,16 +374,10 @@ def main() -> int:
         hat, sigma = wrapper(occupancy, prompt, personal, observed)
     print("probe hat", tuple(hat.shape), "sigma", tuple(sigma.shape), "mean", float(hat.mean()))
 
-    dest = PKG / "UniTS_AD.mlpackage"
+    dest = CACHE / "UniTS_AD.official.mlpackage"
     convert(wrapper, dest)
-    app_dest = APP / "UniTS_AD.mlpackage"
-    if app_dest.parent.exists():
-        if app_dest.exists():
-            shutil.rmtree(app_dest)
-        shutil.copytree(dest, app_dest)
-        print("copied", app_dest)
-    pin_sha(dest, "UniTS_AD.sha256")
-    print("TimesFM student package left unchanged")
+    print("probe package only:", dest)
+    print("shipped UniTS_AD / TimesFM3_Student not overwritten")
     return 0
 
 
