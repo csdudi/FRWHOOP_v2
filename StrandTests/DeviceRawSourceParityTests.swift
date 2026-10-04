@@ -115,4 +115,26 @@ final class DeviceRawSourceParityTests: XCTestCase {
         XCTAssertFalse(pillars.contains("store.rrIntervals(deviceId: repo.deviceId"),
                        "Rhythm must not pin R-R to the currently active device")
     }
+
+    func testWatchdogLiveReadsStayOnActiveStrap() async throws {
+        let repo = Repository(deviceId: "whoop-live")
+        let ids = await repo.watchdogSourceIds()
+        XCTAssertEqual(ids, ["whoop-live"])
+        let union = Repository.rawWhoopSourceIds(activeDeviceId: "whoop-live",
+                                                 registeredWhoopIds: ["whoop-live", "whoop-old"])
+        XCTAssertTrue(union.contains("whoop-old"))
+        XCTAssertNotEqual(ids, union)
+
+        let service = try production("Strand/Watchdog/WatchdogService.swift")
+        XCTAssertTrue(service.contains("let id = model.deviceId"),
+                      "Live window must pin every channel to the active strap")
+        XCTAssertTrue(service.contains("gravitySamples(deviceId: id"),
+                      "IMU / gravity must use the same active id")
+        XCTAssertTrue(service.contains("watchdogSleepSessions"),
+                      "Sleep-open / yesterday confounder must not union every WHOOP")
+        XCTAssertTrue(service.contains("legacyMigratedKey"),
+                      "v1 carry must migrate once, not onto every new deviceId")
+        XCTAssertFalse(service.contains("for id in ids"),
+                       "Must not merge a source-id list into the live window")
+    }
 }

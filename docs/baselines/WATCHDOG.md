@@ -34,7 +34,7 @@ These are the live-engine rules from leftover close-out 1–10. Charge is not re
 
 ## Loop (on the phone)
 
-`WatchdogService.tick` (foreground ~20 s, or a background refresh) → **active strap only** → 30×60 s window → `Watchdog.evaluate`:
+`WatchdogService.tick` (foreground ~20 s, or a background refresh) → **active strap only** (HR, RR, temp, resp, SpO₂, steps, events, **IMU**) → 30×60 s window → `Watchdog.evaluate`. Sleep-open uses that strap’s sessions, not the dashboard WHOOP union. Switching `deviceId` clears live rings and loads that strap’s carry (v1 carry is not copied onto every new id). The UniTS prompt is last completed night, not the Baseline calendar swipe.
 
 1. **Quality** — coverage, HR gaps, wrist-off. `deviceOff` wins; a leftover 2A37 clock cannot clear WRIST_OFF. Wrist-off stays unavailable. A **thin** window or UniTS failure still runs **safety** (fresh still-rest **extrema**, not the minute mean) without the models. An out-of-band RMSSD is kept for that rule; a 3-tap median must not erase it. Safety first-seen unix is held across thin ticks. Other quality fails do not run the models.
 2. **Clocks** — each vital has its own freshness (HR/RHR: WHOOP packet clock; HRV 5 min; temp 8 min; resp / SpO₂ 6 min). Stale series are wiped (`maskStaleChannels`) **before** UniTS / TimesFM. Missing is nil, not BPM 0. Residuals and learning skip absent channels. The same sparse minute is not a new sample.
@@ -47,7 +47,7 @@ These are the live-engine rules from leftover close-out 1–10. Charge is not re
 9. **Green band** — small σ updates on the current phase×activity key after 14 **present** minutes of that channel (still/sleep, or a held workout family). A walk key does not write the still key. Post-workout is not learnable. The same **civil minute** does not increment `n`. Band and sidecar **do not learn** while severity is candidate/active/severe or Layer 1 **personal-off**. Personal-off is last fresh HR / HRV vs the **logged felt-ill / treatment freeze or 60-day** matching usual — not the walking 7-day, not the UniTS hat. A quiet hat with a sustained personal-off is still **candidate**.
 10. **Safety** — still-wrist extrema can page only if that channel is **fresh**, including when coverage is incomplete. Historical backfill and `liveAlerts: false` cannot `shouldNotify`.
 11. **Day tape** — after the tick, unique gated minutes go to Layer 1 `LBDayTape` only when `shouldTrainUsual` is true. Sleep minutes (col-19 or open interval) never write `awakeRest*`. That is observations, not snapshot write. `trainUsual: false` is a no-op.
-12. **Carry / notify** — UserDefaults carry is namespaced by **active `deviceId`**; switching straps clears live rings. First severe of an episode pages once. Mismatch persist is per **civil minute**. Delivery is queued / sent / failed. BG expiration **cancels** the in-flight tick.
+12. **Carry / notify** — UserDefaults carry is namespaced by **active `deviceId`**; switching straps clears live rings and does not clone a leftover v1 blob onto the new id. First severe of an episode pages once. Mismatch persist is per **civil minute**. Delivery is queued / sent / failed. BG expiration **cancels** the in-flight tick.
 
 ## How each vital’s short-term baseline is calculated
 

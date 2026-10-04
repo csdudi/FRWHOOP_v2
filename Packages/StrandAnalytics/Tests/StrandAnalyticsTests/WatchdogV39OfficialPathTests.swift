@@ -110,5 +110,7 @@ final class WatchdogV39OfficialPathTests: XCTestCase {
     func testWatchdogSourceIdsStayActiveOnly() {
         XCTAssertEqual(WatchdogConfig.seqLen, 30)
         XCTAssertEqual(WatchdogConfig.forecastModelVersion, "timesfm3-student-v3")
+        // Live isolation (active id only, no v1 carry clone, sleep not unioned) is in
+        // Strand WatchdogService / Repository.watchdogSourceIds + StrandTests.
     }
 }

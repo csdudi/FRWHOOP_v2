@@ -53,7 +53,7 @@ final class WatchdogService {
         } else {
             window = .failure(.empty)
         }
-        let sessions = await model.repo.sleepSessions(from: now - 20 * 3600, to: now + 3600, limit: 40)
+        let sessions = await model.repo.watchdogSleepSessions(from: now - 20 * 3600, to: now + 3600, limit: 40)
         let sleepIntervals = sessions.map {
             WatchdogSleepInterval(startUnix: $0.effectiveStartTs, endUnix: $0.endTs)
         }
@@ -131,44 +131,35 @@ final class WatchdogService {
             return windowFromLiveOnly(model: model, now: now)
         }
         let from = now - WatchdogConfig.contextSeconds
-        let ids = await model.repo.watchdogSourceIds()
+        let id = model.deviceId
         let family: DeviceFamily = UserDefaults.standard.string(forKey: "selectedWhoopModel") == WhoopModel.whoop5mg.rawValue
             ? .whoop5 : .whoop4
         let limit = family == .whoop5 ? 8_000 : 4_000
 
-        var hrLists: [[HRSample]] = []
-        var rrLists: [[RRInterval]] = []
-        var tempLists: [[SkinTempSample]] = []
-        var spo2Lists: [[SpO2Sample]] = []
-        var respPerMin: [WatchdogScalarSample] = []
-        var eventLists: [[WhoopEvent]] = []
-        var stepLists: [[StepSample]] = []
-        for id in ids {
-            hrLists.append((try? await store.hrSamples(deviceId: id, from: from, to: now, limit: limit)) ?? [])
-            rrLists.append((try? await store.rrIntervals(deviceId: id, from: from, to: now, limit: 8_000)) ?? [])
-            tempLists.append((try? await store.skinTempSamples(deviceId: id, from: from, to: now, limit: limit)) ?? [])
-            spo2Lists.append((try? await store.spo2Samples(deviceId: id, from: from, to: now, limit: limit)) ?? [])
-            let respRows = (try? await store.respSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
-            respPerMin.append(contentsOf: WatchdogWindowBuilder.respPerMin(
-                rawRows: respRows.map { (ts: $0.ts, raw: $0.raw) },
-                ringRate: OuraRespScale.isRingRateStream(deviceId: id),
-                start: from, end: now))
-            eventLists.append((try? await store.events(deviceId: id, from: from, to: now, limit: 400)) ?? [])
-            stepLists.append((try? await store.stepSamples(deviceId: id, from: from, to: now, limit: limit)) ?? [])
-        }
-        var hr = mergeByTs(hrLists, ts: \.ts)
+        let hrStored = (try? await store.hrSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
+        let rrStored = (try? await store.rrIntervals(deviceId: id, from: from, to: now, limit: 8_000)) ?? []
+        let tempLists = (try? await store.skinTempSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
+        let spo2Lists = (try? await store.spo2Samples(deviceId: id, from: from, to: now, limit: limit)) ?? []
+        let respRows = (try? await store.respSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
+        let respPerMin = WatchdogWindowBuilder.respPerMin(
+            rawRows: respRows.map { (ts: $0.ts, raw: $0.raw) },
+            ringRate: OuraRespScale.isRingRateStream(deviceId: id),
+            start: from, end: now)
+        let eventLists = (try? await store.events(deviceId: id, from: from, to: now, limit: 400)) ?? []
+        let stepLists = (try? await store.stepSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
+        var hr = hrStored
         hr.append(contentsOf: liveHRRing.filter { sample in
             sample.ts >= from && sample.ts <= now && !hr.contains(where: { $0.ts == sample.ts })
         })
-        var rr = Repository.mergeRRByIdentity(rrLists)
+        var rr = rrStored
         rr.append(contentsOf: liveRRRing.filter { beat in
             beat.ts >= from && beat.ts <= now
         })
-        let tempsRaw = mergeByTs(tempLists, ts: \.ts)
+        let tempsRaw = tempLists.sorted { $0.ts < $1.ts }
         let temps = tempsRaw.map {
             WatchdogScalarSample(ts: $0.ts, value: skinTempCelsius(raw: $0.raw, family: family))
         }
-        let gravity = (try? await store.gravitySamples(deviceId: model.deviceId, from: from, to: now, limit: limit)) ?? []
+        let gravity = (try? await store.gravitySamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
         let imu = gravity.map {
             WatchdogIMUSample(ts: $0.ts, x: $0.x, y: $0.y, z: $0.z, dynAccel: $0.dynAccel)
         }
@@ -180,14 +171,14 @@ final class WatchdogService {
             else { occ = fromVector }
             return WatchdogScalarSample(ts: g.ts, value: occ)
         }
-        let events = mergeByTs(eventLists, ts: \.ts)
+        let events = eventLists.sorted { $0.ts < $1.ts }
         let liveBeating = WatchdogLiveTape.isFresh(
             packetUnix: model.live.lastHeartRatePacketUnix,
             now: now,
             freshnessSeconds: WatchdogQuality.freshnessLimit(family)
         )
         let wristOff = WatchdogLiveTape.wristOff(deviceOff: lastWristOff(events), freshLiveHR: liveBeating)
-        let spo2Pct = mergeByTs(spo2Lists, ts: \.ts).compactMap { sample -> WatchdogScalarSample? in
+        let spo2Pct = spo2Lists.sorted { $0.ts < $1.ts }.compactMap { sample -> WatchdogScalarSample? in
             guard let pct = WatchdogWindowBuilder.percentFromOptical(red: sample.red, ir: sample.ir) else {
                 return nil
             }
@@ -195,7 +186,7 @@ final class WatchdogService {
         }
         let usedLive = liveHRRing.contains { $0.ts >= from }
         let hrSource: WatchdogHRSource = usedLive ? .live2A37 : (family == .whoop5 ? .ppgHr : .v18)
-        let steps = mergeByTs(stepLists, ts: \.ts)
+        let steps = stepLists.sorted { $0.ts < $1.ts }
         let feed = WatchdogFeed(family: family, hrSource: hrSource, nowUnix: now,
                                 hr: hr, rr: rr, skinTempC: temps, respPerMin: respPerMin,
                                 motion: motion,
@@ -222,14 +213,6 @@ final class WatchdogService {
         return WatchdogWindowBuilder.build(feed)
     }
 
-    private func mergeByTs<T>(_ lists: [[T]], ts: (T) -> Int) -> [T] {
-        var byTs: [Int: T] = [:]
-        for list in lists {
-            for row in list where byTs[ts(row)] == nil { byTs[ts(row)] = row }
-        }
-        return byTs.values.sorted { ts($0) < ts($1) }
-    }
-
     private func lastWristOff(_ events: [WhoopEvent]) -> Bool {
         var off = false
         for e in events.sorted(by: { $0.ts < $1.ts }) {
@@ -240,6 +223,8 @@ final class WatchdogService {
     }
 
     private static let carryKeyPrefix = "noop.watchdog.carry.v2."
+    private static let legacyCarryKey = "noop.watchdog.carry.v1"
+    private static let legacyMigratedKey = "noop.watchdog.carry.v1.migratedTo"
 
     private static func carryKey(deviceId: String) -> String {
         carryKeyPrefix + deviceId
@@ -251,8 +236,12 @@ final class WatchdogService {
            let decoded = try? JSONDecoder().decode(WatchdogCarry.self, from: data) {
             return decoded
         }
-        if let legacy = defaults.data(forKey: "noop.watchdog.carry.v1"),
+        // v1 was one blob. Copy it once onto the first strap that needs a v2 key.
+        // Do not stamp that episode / band onto every later deviceId.
+        if defaults.string(forKey: Self.legacyMigratedKey) == nil,
+           let legacy = defaults.data(forKey: Self.legacyCarryKey),
            let decoded = try? JSONDecoder().decode(WatchdogCarry.self, from: legacy) {
+            defaults.set(deviceId, forKey: Self.legacyMigratedKey)
             defaults.set(legacy, forKey: Self.carryKey(deviceId: deviceId))
             return decoded
         }

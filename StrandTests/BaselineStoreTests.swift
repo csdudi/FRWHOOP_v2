@@ -443,6 +443,27 @@ final class BaselineStoreTests: XCTestCase {
         XCTAssertEqual(store.activeStart?.primarySeries.count, 2)
     }
 
+    @MainActor
+    func testLiveWatchdogPromptIgnoresCalendarSwipe() {
+        let store = isolatedStore()
+        let days = tape(pre: 58, post: 62)
+        store.rescore(days: days)
+        store.shiftDay(-12, days: days)
+        let swiped = store.asOf
+        XCTAssertNotEqual(swiped, "2026-04-29")
+        let liveAsOf = BaselineStore.livePromptAsOf(days: days)
+        XCTAssertNotEqual(liveAsOf, swiped)
+        let prompt = store.watchdogPromptEvaluations(days: days)
+        XCTAssertFalse(prompt.isEmpty)
+        for ev in prompt {
+            XCTAssertEqual(ev.asOf, liveAsOf, ev.series.rawValue)
+            XCTAssertNotEqual(ev.asOf, swiped, ev.series.rawValue)
+        }
+        store.shiftDay(-5, days: days)
+        let again = store.watchdogPromptEvaluations(days: days)
+        XCTAssertEqual(again.map(\.asOf), prompt.map(\.asOf))
+    }
+
     func testOffPaintStrengthIsNilInsideBandAndRampsOutside() {
         XCTAssertNil(BaselineOffPaint.strength(value: 64, lo: 56, hi: 72))
         XCTAssertEqual(BaselineOffPaint.strength(value: 72, lo: 56, hi: 72), nil)
