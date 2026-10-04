@@ -60,11 +60,7 @@ final class WatchdogService {
         let sleepOpen = sleepIntervals.contains { $0.contains(now) }
         let todayLog = model.baseline.calendarTodayLog
         let yesterdayLog = model.baseline.dayLogsByDay[BaselineStore.yesterdayKey()]
-        let log: LBDayLog? = {
-            if todayLog?.confoundsUsual == true { return todayLog }
-            if sleepOpen, yesterdayLog?.confoundsUsual == true { return yesterdayLog }
-            return todayLog ?? yesterdayLog
-        }()
+        let log = Watchdog.liveDayLog(today: todayLog, yesterday: yesterdayLog, sleepOpen: sleepOpen)
         let result = Watchdog.evaluate(window: window,
                                        prompt: prompt,
                                        evaluations: promptEvals,
@@ -79,7 +75,8 @@ final class WatchdogService {
                                        liveAlerts: liveAlerts)
         carry = result.carry
         persistCarry(deviceId: model.deviceId)
-        if case .success(let built) = window {
+        if case .success(let built) = window,
+           Watchdog.shouldTrainUsual(result: result, dayLog: log) {
             model.baseline.ingestImu(samples: built.imu, nowUnix: now)
             model.baseline.ingestWatchdogTape(window: built, nowUnix: now,
                                               lastWorkoutEndUnix: carry.lastWorkoutEndUnix,

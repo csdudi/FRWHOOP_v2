@@ -108,8 +108,8 @@ final class WatchdogV34ActivityConnectTests: XCTestCase {
     }
 
     func testV2PackageDoesNotClaimActivityInput() {
-        XCTAssertEqual(WatchdogConfig.modelVersion, "units-ad-coreml-v2")
-        XCTAssertEqual(WatchdogConfig.forecastModelVersion, "timesfm3-student-v2")
+        XCTAssertEqual(WatchdogConfig.modelVersion, "units-ad-coreml-v3")
+        XCTAssertEqual(WatchdogConfig.forecastModelVersion, "timesfm3-student-v3")
         if UniTSCoreMLSession.shared.isLoaded {
             XCTAssertFalse(UniTSCoreMLSession.shared.declaresActivityInput,
                            "v2 occupancy package must not require activity (1,30,20)")

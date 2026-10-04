@@ -13,7 +13,7 @@ final class WatchdogV2GauntletTests: XCTestCase {
             severity: .severe, openedEpisode: true, safety: false, previousSafety: false,
             fused: 3, previousFused: 0)
         XCTAssertTrue(notify)
-        XCTAssertEqual(reason, "episode-start")
+        XCTAssertEqual(reason, "first-severe")
     }
 
     func test02JointEnergyIsOnEveryResidual() throws {
@@ -68,7 +68,7 @@ final class WatchdogV2GauntletTests: XCTestCase {
         let first = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
                                       nowUnix: t, inject: .severe)
         XCTAssertTrue(first.shouldNotify)
-        XCTAssertEqual(first.notifyReason, "episode-start")
+        XCTAssertTrue(first.notifyReason == "safety" || first.notifyReason == "first-severe")
         let stable = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
                                        nowUnix: t + 20, previous: first.carry, inject: .severe)
         XCTAssertFalse(stable.shouldNotify)
@@ -77,7 +77,8 @@ final class WatchdogV2GauntletTests: XCTestCase {
         hotter.lastJointEnergy = 0
         hotter.lastReconEnergy = 0
         let escalate = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
-                                         nowUnix: t + 40, previous: hotter, inject: .severe)
+                                         nowUnix: t + WatchdogConfig.notifyCooldownSeconds + 40,
+                                         previous: hotter, inject: .severe)
         XCTAssertTrue(escalate.shouldNotify)
         XCTAssertEqual(escalate.notifyReason, "escalate")
     }
@@ -131,8 +132,9 @@ final class WatchdogV2GauntletTests: XCTestCase {
         let te = LongitudinalBaseline.isoEpochDay(asOf)!
         func tape(_ v: Double) -> [LBDailyObservation] {
             (1...40).map {
-                LBDailyObservation(day: LongitudinalBaseline.isoFromEpochDay(te - $0), value: v, qualityStatus: .ok)
-            } + [LBDailyObservation(day: asOf, value: v, qualityStatus: .ok)]
+                LBDailyObservation(day: LongitudinalBaseline.isoFromEpochDay(te - $0), value: v,
+                                   qualityStatus: .ok, coverage: 40)
+            } + [LBDailyObservation(day: asOf, value: v, qualityStatus: .ok, coverage: 40)]
         }
         let p = UniTSPrompt.from(evaluations: [
             LongitudinalBaseline.evaluate(asOf: asOf, series: .sleepRHR, observations: tape(50)),
@@ -198,7 +200,7 @@ final class WatchdogV2GauntletTests: XCTestCase {
     }
 
     func test12TimesFMStudentForecastShapesAndFusion() throws {
-        XCTAssertEqual(WatchdogForecastRuntime.modelVersion, "timesfm3-student-v2")
+        XCTAssertEqual(WatchdogForecastRuntime.modelVersion, "timesfm3-student-v3")
         XCTAssertEqual(WatchdogCalibration.forecastHorizon, 5)
         XCTAssertGreaterThan(WatchdogCalibration.forecastAlpha, 0)
         let win = try window(hr: 58, hrv: 48, temp: 33.1, resp: 14)
@@ -219,6 +221,8 @@ final class WatchdogV2GauntletTests: XCTestCase {
         carry.lastForecastRHR = Array(repeating: 58.0, count: 5)
         carry.lastForecastSpO2 = Array(repeating: 97.0, count: 5)
         carry.forecastStudentOk = true
+        carry.lastForecastUnix = win.nowUnix - 120
+        carry.lastForecastHorizonUnix = WatchdogForecastStep.horizonUnix(nowUnix: carry.lastForecastUnix)
         let diverged = WatchdogForecastRuntime().step(window: win, residual: residual,
                                                      prompt: UniTSPrompt(hr: 58, hrv: 48, temp: 33.1, resp: 14),
                                                      carry: carry)

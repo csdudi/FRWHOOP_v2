@@ -1,8 +1,8 @@
 {
   "config_version": "watchdog-v2.2",
-  "model_version": "units-ad-coreml-v2",
+  "model_version": "units-ad-coreml-v3",
   "fallback_model_version": "units-ad-recon-v3",
-  "forecast_model_version": "timesfm3-student-v2",
+  "forecast_model_version": "timesfm3-student-v3",
   "param_set": "v1.review",
   "seq_len": 30,
   "grid_seconds": 60,
@@ -20,5 +20,5 @@
   "min_coverage": 0.80,
   "coreml_checkpoint": "UniTS_AD.mlpackage",
   "forecast_checkpoint": "TimesFM3_Student.mlpackage",
-  "note": "watchdog-v2.1: HR vs RHR split, IMU/step activity embedding, adaptive σ. units-ad-coreml-v2 + timesfm3-student-v2. No on-device training. Re-export: python3 Tools/units-watchdog/train_export.py"
+  "note": "watchdog-v2.2: students with present_mask. units-ad-coreml-v3 + timesfm3-student-v3. No on-device training. Re-export: python3 Tools/units-watchdog/train_export.py"
 }

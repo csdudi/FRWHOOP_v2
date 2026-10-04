@@ -145,3 +145,5 @@ Packages/StrandAnalytics/Baseline/FRWHOOP_*.md
 Packages/StrandAnalytics/Baseline/units/WatchdogPrimeAgent*
 Packages/StrandAnalytics/Baseline/units/WatchdogTuneReport.md
 Tools/units-watchdog/PRIME_AGENT*.md
+Tools/units-watchdog/.official-ckpts/
+Tools/units-watchdog/.venv/

@@ -109,6 +109,6 @@ final class WatchdogV39OfficialPathTests: XCTestCase {
 
     func testWatchdogSourceIdsStayActiveOnly() {
         XCTAssertEqual(WatchdogConfig.seqLen, 30)
-        XCTAssertEqual(WatchdogConfig.forecastModelVersion, "timesfm3-student-v2")
+        XCTAssertEqual(WatchdogConfig.forecastModelVersion, "timesfm3-student-v3")
     }
 }

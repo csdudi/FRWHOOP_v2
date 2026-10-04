@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Train and export Watchdog Core ML students.
+"""Train and export Watchdog Core ML students (not official Harvard / TimesFM 3.0).
 
-UniTS-AD: time–channel mixer. Learns joint reconstruction from occupancy +
-prompt + observed window. Target is expected physiology (spike-robust), not
-a copy of the live trace. Physics equations are the training teacher, not
-the shipped 1×1 identity.
+UniTS-AD: mixer learns hat/sigma from occupancy + prompt + observed + present_mask.
+Holes are prompt-filled; the mask is 1 only on measured minutes. Teacher is the
+physics expected strip, not a copy of spikes.
 
-TimesFM-style student: patched causal decoder, 30-min context → 5-min
-multivariate forecast. Same job as TimesFM 3.0 on this strip. Google 330M
-weights are not bundled (non-commercial). Never train on the phone.
+TimesFM-style student: 30-min context → 5 future minutes (now+60…now+300).
+Trained on that future target, with the same present_mask. Google 330M weights
+are not bundled. Never train on the phone.
 """
 from __future__ import annotations
 
@@ -175,7 +174,7 @@ class UniTSAD(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.in_proj = nn.Linear(CH + 1 + CH, D_UNITS)
+        self.in_proj = nn.Linear(CH + 1 + CH + CH, D_UNITS)
         self.blocks = nn.ModuleList([MixerBlock(SEQ, D_UNITS) for _ in range(3)])
         self.out_hat = nn.Linear(D_UNITS, CH)
         self.out_sig = nn.Linear(D_UNITS, CH)
@@ -183,14 +182,15 @@ class UniTSAD(nn.Module):
         self.register_buffer("lo", LO.view(1, CH, 1))
         self.register_buffer("hi", HI.view(1, CH, 1))
 
-    def forward(self, occupancy, prompt, personal_scale, observed):
+    def forward(self, occupancy, prompt, personal_scale, observed, present_mask):
         personal = personal_scale.view(-1, CH, 1).clamp(min=0.05)
         prompt_t = prompt.view(-1, CH, 1)
-        z = (observed - prompt_t) / personal
+        mask = present_mask.clamp(0, 1)
+        z = ((observed - prompt_t) / personal) * mask
         occ = occupancy.clamp(0, 1).unsqueeze(1)
         phys = physics_hat_seq(occupancy, prompt)
         z_phys = (phys - prompt_t) / personal
-        x = torch.cat([z, occ, z_phys], dim=1).transpose(1, 2)
+        x = torch.cat([z, occ, z_phys, mask], dim=1).transpose(1, 2)
         x = self.in_proj(x)
         for block in self.blocks:
             x = block(x)
@@ -230,7 +230,7 @@ class TimesFMStudent(nn.Module):
     def __init__(self):
         super().__init__()
         self.patches = SEQ // PATCH
-        self.embed = nn.Linear(PATCH * CH, D_FM)
+        self.embed = nn.Linear(PATCH * (CH + CH + 1), D_FM)
         self.pos = nn.Parameter(torch.zeros(1, self.patches, D_FM))
         self.n1 = nn.LayerNorm(D_FM)
         self.attn = CausalAttn(D_FM, 4, self.patches)
@@ -240,15 +240,29 @@ class TimesFMStudent(nn.Module):
         self.register_buffer("lo", LO.view(1, CH, 1))
         self.register_buffer("hi", HI.view(1, CH, 1))
 
-    def forward(self, history: torch.Tensor, prompt: torch.Tensor, occupancy: torch.Tensor) -> torch.Tensor:
-        x = history.transpose(1, 2).contiguous().view(-1, self.patches, PATCH * CH)
+    def forward(self, history: torch.Tensor, prompt: torch.Tensor, occupancy: torch.Tensor,
+                present_mask: torch.Tensor) -> torch.Tensor:
+        mask = present_mask.clamp(0, 1)
+        prompt_t = prompt.view(-1, CH, 1)
+        hist = history * mask + prompt_t * (1.0 - mask)
+        occ_row = occupancy.clamp(0, 1).unsqueeze(1)
+        feat = torch.cat([hist, mask, occ_row], dim=1)
+        x = feat.transpose(1, 2).contiguous().view(-1, self.patches, PATCH * (CH + CH + 1))
         x = self.embed(x) + self.pos
         x = x + self.attn(self.n1(x))
         x = x + self.ff(self.n2(x))
         y = self.head(x[:, -1, :]).view(-1, CH, HORIZON)
-        y = y + prompt.unsqueeze(-1) * 0 + occupancy.mean(dim=1, keepdim=True).unsqueeze(-1) * 0
-        last = history[:, :, -1:]
+        last = hist[:, :, -1:]
         return torch.minimum(self.hi, torch.maximum(self.lo, last + y))
+
+
+def drop_present_mask(n: int, tlen: int) -> torch.Tensor:
+    """1 = measured. Sparse temp/resp/spo2; random holes on HR/RHR/HRV."""
+    present = torch.ones(n, CH, tlen)
+    present[:, :3] = (torch.rand(n, 3, tlen) > 0.12).float()
+    present[:, 3:] = (torch.rand(n, 3, tlen) > 0.55).float()
+    present[:, :, -1] = 1.0
+    return present
 
 
 def sample_batch(n: int, extra_future: int = 0) -> dict[str, torch.Tensor]:
@@ -275,6 +289,9 @@ def sample_batch(n: int, extra_future: int = 0) -> dict[str, torch.Tensor]:
     observed = clean + noise
     spike = torch.rand(n, 1, tlen) < 0.04
     observed = torch.where(spike, observed + personal.view(n, CH, 1) * 4, observed)
+    present = drop_present_mask(n, tlen)
+    prompt_t = prompt.view(n, CH, 1)
+    observed = observed * present + prompt_t * (1.0 - present)
     lo = LO.view(1, CH, 1)
     hi = HI.view(1, CH, 1)
     observed = observed.clamp(lo, hi)
@@ -284,20 +301,29 @@ def sample_batch(n: int, extra_future: int = 0) -> dict[str, torch.Tensor]:
         "personal": personal,
         "clean": clean,
         "observed": observed,
+        "present": present,
     }
 
 
-def train_units(steps: int = 1400) -> UniTSAD:
+def train_units(steps: int = 1600) -> UniTSAD:
     torch.manual_seed(SEED)
     model = UniTSAD()
     opt = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
     model.train()
     for step in range(steps):
         b = sample_batch(64)
-        hat, sigma = model(b["occupancy"][:, :SEQ], b["prompt"], b["personal"], b["observed"][:, :, :SEQ])
+        present = b["present"][:, :, :SEQ]
+        hat, sigma = model(
+            b["occupancy"][:, :SEQ],
+            b["prompt"],
+            b["personal"],
+            b["observed"][:, :, :SEQ],
+            present,
+        )
         target = b["clean"][:, :, :SEQ]
         scale = b["personal"].view(-1, CH, 1).clamp(min=0.05)
-        loss_h = F.smooth_l1_loss((hat - target) / scale, torch.zeros_like(hat))
+        w = (0.35 + 0.65 * present)
+        loss_h = F.smooth_l1_loss(w * (hat - target) / scale, torch.zeros_like(hat))
         sig_t = physics_sigma(b["occupancy"][:, :SEQ], b["prompt"], b["personal"], target)
         loss_s = F.smooth_l1_loss(sigma, sig_t)
         loss = loss_h + 0.15 * loss_s
@@ -311,16 +337,16 @@ def train_units(steps: int = 1400) -> UniTSAD:
     return model
 
 
-def train_forecast(steps: int = 1200) -> TimesFMStudent:
+def train_forecast(steps: int = 1600) -> TimesFMStudent:
     torch.manual_seed(SEED + 1)
     model = TimesFMStudent()
     opt = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
     model.train()
     for step in range(steps):
         b = sample_batch(64, extra_future=HORIZON)
-        hist = b["clean"][:, :, :SEQ]
+        hist = b["observed"][:, :, :SEQ]
         fut = b["clean"][:, :, SEQ : SEQ + HORIZON]
-        pred = model(hist, b["prompt"], b["occupancy"][:, :SEQ])
+        pred = model(hist, b["prompt"], b["occupancy"][:, :SEQ], b["present"][:, :, :SEQ])
         scale = b["personal"].view(-1, CH, 1).clamp(min=0.05)
         loss = F.smooth_l1_loss((pred - fut) / scale, torch.zeros_like(pred))
         opt.zero_grad()
@@ -374,8 +400,9 @@ def main() -> None:
     prompt = torch.tensor([[58.0, 58.0, 48.0, 33.1, 14.0, 97.0]])
     personal = torch.tensor([[5.0, 5.0, 8.0, 0.35, 3.0, 2.0]])
     observed = physics_hat(occ, prompt)
+    present = torch.ones(1, CH, SEQ)
     with torch.no_grad():
-        traced_u = torch.jit.trace(units, (occ, prompt, personal, observed))
+        traced_u = torch.jit.trace(units, (occ, prompt, personal, observed, present))
     export_ml(
         traced_u,
         [
@@ -383,35 +410,37 @@ def main() -> None:
             ct.TensorType(name="prompt", shape=(1, CH)),
             ct.TensorType(name="personal_scale", shape=(1, CH)),
             ct.TensorType(name="observed", shape=(1, CH, SEQ)),
+            ct.TensorType(name="present_mask", shape=(1, CH, SEQ)),
         ],
         [ct.TensorType(name="hat"), ct.TensorType(name="sigma")],
         [pkg_dir / "UniTS_AD.mlpackage", app_dir / "UniTS_AD.mlpackage"],
-        "units-ad-coreml-v2",
-        "Trained UniTS-style reconstruction AD: hat and sigma, 6 vitals × 30 min.",
+        "units-ad-coreml-v3",
+        "Student UniTS-style reconstruction: hat/sigma, present_mask (1=measured).",
     )
     pin_sha(pkg_dir / "UniTS_AD.mlpackage", pin, "UniTS_AD.sha256")
 
     fm = train_forecast()
     hist = observed
     with torch.no_grad():
-        traced_f = torch.jit.trace(fm, (hist, prompt, occ))
+        traced_f = torch.jit.trace(fm, (hist, prompt, occ, present))
     export_ml(
         traced_f,
         [
             ct.TensorType(name="history", shape=(1, CH, SEQ)),
             ct.TensorType(name="prompt", shape=(1, CH)),
             ct.TensorType(name="occupancy", shape=(1, SEQ)),
+            ct.TensorType(name="present_mask", shape=(1, CH, SEQ)),
         ],
         [ct.TensorType(name="forecast")],
         [pkg_dir / "TimesFM3_Student.mlpackage", app_dir / "TimesFM3_Student.mlpackage"],
-        "timesfm3-student-v2",
-        "TimesFM-style patched student: 6 vitals × 5 min forecast.",
+        "timesfm3-student-v3",
+        "Student TimesFM-style 5-min future forecast; present_mask on history.",
     )
     pin_sha(pkg_dir / "TimesFM3_Student.mlpackage", pin, "TimesFM3_Student.sha256")
 
     with torch.no_grad():
-        hat, _ = units(occ, prompt, personal, observed)
-        fut = fm(hist, prompt, occ)
+        hat, _ = units(occ, prompt, personal, observed, present)
+        fut = fm(hist, prompt, occ, present)
         print("units rest HR hat", hat[0, 0, -1].item())
         print("forecast next HR", fut[0, 0].tolist())
 

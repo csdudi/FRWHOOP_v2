@@ -221,7 +221,8 @@ public struct UniTSRuntime: Sendable {
             prompt: bases.map { $0 ?? 0 },
             personalScale: personal,
             observed: packObserved(window, bases: bases),
-            activity: activity
+            activity: activity,
+            presentMask: packPresentMask(window)
         )
         guard let pred else { return nil }
         func hat(_ channel: Int, valid: Bool) -> [Double?] {
@@ -342,7 +343,7 @@ public struct UniTSRuntime: Sendable {
         ]
     }
 
-    /// 1 = measured minute. Official convert uses this so packed 0 is not a rest BPM.
+    /// 1 = measured minute. Fed to Core ML when the graph has a mask input; student graphs use occupancy + prompt fill.
     static func packPresentMask(_ window: WatchdogWindow) -> [[Double]] {
         func mask(_ xs: [Double?]) -> [Double] {
             (0..<WatchdogConfig.seqLen).map { i in

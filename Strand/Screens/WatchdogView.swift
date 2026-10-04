@@ -384,27 +384,33 @@ private struct WatchdogLiveSnapshot {
                 Self.row(id: "hr", name: "Heart rate", signal: hr, series: result.horizonHR,
                          reconstructed: result.reconstructedHR, rangeSeries: result.rangeHR,
                          caption: "Last 30 min", minSpan: 8, whoop5: whoop5,
-                         trustPct: hr?.trustPct ?? 0),
+                         trustPct: hr?.trustPct ?? 0, liveOff: result.liveOff,
+                         channelHot: result.contributing.contains("HR") || result.personalOff),
                 Self.row(id: "rhr", name: "Resting HR", signal: rhr, series: result.horizonRHR,
                          reconstructed: result.reconstructedRHR, rangeSeries: result.rangeRHR,
                          caption: "Still minutes only", minSpan: 8, whoop5: whoop5,
-                         trustPct: rhr?.trustPct ?? 0),
+                         trustPct: rhr?.trustPct ?? 0, liveOff: result.liveOff,
+                         channelHot: result.contributing.contains("RHR") || result.personalOff),
                 Self.row(id: "hrv", name: "HRV", signal: hrv, series: result.horizonHRV,
                          reconstructed: result.reconstructedHRV, rangeSeries: result.rangeHRV,
                          caption: "5 min RMSSD", minSpan: 18, whoop5: whoop5,
-                         trustPct: hrv?.trustPct ?? 0),
+                         trustPct: hrv?.trustPct ?? 0, liveOff: result.liveOff,
+                         channelHot: result.contributing.contains("HRV") || result.personalOff),
                 Self.row(id: "temp", name: "Temp", signal: temp, series: result.horizonTemp,
                          reconstructed: result.reconstructedTemp, rangeSeries: result.rangeTemp,
                          caption: "Last 30 min", minSpan: 0.4, whoop5: whoop5,
-                         fahrenheit: fahrenheit, trustPct: temp?.trustPct ?? 0),
+                         fahrenheit: fahrenheit, trustPct: temp?.trustPct ?? 0, liveOff: result.liveOff,
+                         channelHot: result.contributing.contains("Temp")),
                 Self.row(id: "resp", name: "Breathing", signal: resp, series: result.horizonResp,
                          reconstructed: result.reconstructedResp, rangeSeries: result.rangeResp,
                          caption: "Last 30 min", minSpan: 4, whoop5: whoop5,
-                         trustPct: resp?.trustPct ?? 0),
+                         trustPct: resp?.trustPct ?? 0, liveOff: result.liveOff,
+                         channelHot: result.contributing.contains("Resp")),
                 Self.row(id: "spo2", name: "SpO₂", signal: spo2, series: result.horizonSpO2,
                          reconstructed: result.reconstructedSpO2, rangeSeries: result.rangeSpO2,
                          caption: "When present", minSpan: 2, whoop5: whoop5,
-                         trustPct: spo2?.trustPct ?? 0)
+                         trustPct: spo2?.trustPct ?? 0, liveOff: result.liveOff,
+                         channelHot: result.contributing.contains("SpO2"))
             ]
             return
         }
@@ -428,7 +434,7 @@ private struct WatchdogLiveSnapshot {
     static func row(id: String, name: String, signal: WatchdogSignalEvidence?,
                     series: [Double], reconstructed: [Double], rangeSeries: [Double],
                     caption: String, minSpan: Double, whoop5: Bool, fahrenheit: Bool = false,
-                    trustPct: Int) -> MetricRow {
+                    trustPct: Int, liveOff: Bool = false, channelHot: Bool = false) -> MetricRow {
         var now = signal?.observed
         var usual = signal?.reconstructed ?? signal?.usual
         var series = series
@@ -488,7 +494,7 @@ private struct WatchdogLiveSnapshot {
         } else if !callReady {
             status = "Learning"
             tone = StrandPalette.textSecondary
-        } else if outsideBand {
+        } else if liveOff && (outsideBand || channelHot) {
             let mag: Double
             if lastWidth > 0, let lastObs, let lastHat {
                 mag = min(1, abs(lastObs - lastHat) / max(lastWidth, 0.001) / WatchdogConfig.tauSevere)

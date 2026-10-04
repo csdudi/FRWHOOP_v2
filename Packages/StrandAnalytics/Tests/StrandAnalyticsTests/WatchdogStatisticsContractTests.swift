@@ -50,7 +50,7 @@ final class WatchdogStatisticsContractTests: XCTestCase {
         XCTAssertEqual(WatchdogBand.shouldCountMinute(nowUnix: 100, lastUnix: 90), false)
         XCTAssertTrue(WatchdogBand.shouldCountMinute(nowUnix: 120, lastUnix: 59))
         XCTAssertEqual(WatchdogConfig.coreMLCheckpoint, "UniTS_AD.mlpackage")
-        XCTAssertEqual(WatchdogConfig.forecastModelVersion, "timesfm3-student-v2")
+        XCTAssertEqual(WatchdogConfig.forecastModelVersion, "timesfm3-student-v3")
         XCTAssertEqual(WatchdogForecastRuntime.modelVersion, WatchdogConfig.forecastModelVersion)
         XCTAssertTrue([WatchdogConfig.modelVersion, WatchdogConfig.fallbackModelVersion]
             .contains(WatchdogConfig.modelVersion))

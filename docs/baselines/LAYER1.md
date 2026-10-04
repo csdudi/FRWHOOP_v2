@@ -49,6 +49,7 @@ Establish N = 21. Coverage ≥ 60 unique minutes. Same 7-day / 60-day copies as 
 4. A large residual can flag “off usual” without immediately moving the center.
 5. CUSUM tracks a slow shift across nights. Missing days skip the accumulator; they do not reset it.
 6. If the wearer logged a treatment start, the trial layer **freezes** the pre-start path. Watchdog cannot invent that start.
+7. **Felt ill** (daily log) **snapshots** the last clean when-well / week copies for Watchdog’s personal-off ruler. It does **not** open a new long epoch and does not change Layer 1 skip-and-hold. A week-vs-long split without a log does **not** freeze. Only a logged treatment start wipes and restarts the long path.
 
 ### Medication labels
 

@@ -24,7 +24,8 @@ final class UniTSCoreMLSession: @unchecked Sendable {
     }
 
     func predict(occupancy: [Double], prompt: [Double], personalScale: [Double],
-                 observed: [[Double]], activity: [[Double]] = []) -> (hat: [[Double]], sigma: [[Double]])? {
+                 observed: [[Double]], activity: [[Double]] = [],
+                 presentMask: [[Double]] = []) -> (hat: [[Double]], sigma: [[Double]])? {
         lock.lock()
         defer { lock.unlock() }
         guard let model = loadIfNeeded() else { return nil }
@@ -39,6 +40,7 @@ final class UniTSCoreMLSession: @unchecked Sendable {
                 "personal_scale": MLFeatureValue(multiArray: sc),
                 "observed": MLFeatureValue(multiArray: obs)
             ]
+            Self.attachPresentMask(dict: &dict, model: model, presentMask: presentMask)
             let hasActivity = model.modelDescription.inputDescriptionsByName["activity"] != nil
             if hasActivity, !activity.isEmpty, let act = try? Self.timeFeatures(activity) {
                 dict["activity"] = MLFeatureValue(multiArray: act)
@@ -87,6 +89,18 @@ final class UniTSCoreMLSession: @unchecked Sendable {
             return url
         }
         return Bundle.main.url(forResource: "UniTS_AD", withExtension: "mlpackage")
+    }
+
+    /// Students require `present_mask` (1 = measured). Empty caller → all ones.
+    static func attachPresentMask(dict: inout [String: MLFeatureValue], model: MLModel,
+                                  presentMask: [[Double]]) {
+        let names = ["present_mask", "mask", "missing_mask"]
+        guard let name = names.first(where: { model.modelDescription.inputDescriptionsByName[$0] != nil })
+        else { return }
+        let seq = WatchdogConfig.seqLen
+        let mask = presentMask.isEmpty ? Array(repeating: Array(repeating: 1.0, count: seq), count: 6) : presentMask
+        guard let arr = try? cube(mask, channels: 6, seq: seq) else { return }
+        dict[name] = MLFeatureValue(multiArray: arr)
     }
 
     static func vector(_ xs: [Double], shape: [NSNumber]) throws -> MLMultiArray {

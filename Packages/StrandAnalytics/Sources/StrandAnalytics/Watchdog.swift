@@ -95,6 +95,8 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
     public var quietAbsSpO2: Double
     public var quietN: Int
     public var lastForecastUnix: Int
+    /// Civil seconds the last cube columns belong to (`now+60…now+300` at emit). Holds do not slide these.
+    public var lastForecastHorizonUnix: [Int]
     /// Last `lastForecast*` arrays came from a real 6×5 student cube, not a hold.
     public var forecastStudentOk: Bool
     public var quietJointEma: Double
@@ -148,7 +150,13 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
     public var notifiedSevereEpisodeId: String
     /// Last civil minute that advanced persist / quiet counters.
     public var lastPersistMinute: Int
+    /// Last measurement civil minute that counted as a persist observation.
+    public var lastPersistObsMinute: Int
     public var notifyDelivery: String
+    /// First unix the current safety extreme was seen. 0 = none. Survives thin / UniTS-fail ticks.
+    public var safetyFirstUnix: Int
+    public var safetyExtreme: Double
+    public var safetyChannel: String
 
     public static let empty = WatchdogCarry()
 
@@ -165,7 +173,9 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
                 consecutiveInRangeTicks: Int = 0,
                 quietAbsHR: Double = 0, quietAbsRHR: Double = 0, quietAbsHRV: Double = 0,
                 quietAbsTemp: Double = 0, quietAbsResp: Double = 0, quietAbsSpO2: Double = 0,
-                quietN: Int = 0, lastForecastUnix: Int = 0, forecastStudentOk: Bool = false,
+                quietN: Int = 0, lastForecastUnix: Int = 0,
+                lastForecastHorizonUnix: [Int] = [],
+                forecastStudentOk: Bool = false,
                 quietJointEma: Double = 0,
                 lastReconEnergy: Double = 0,
                 dirEma: [Double] = Array(repeating: 0, count: 6),
@@ -200,7 +210,11 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
                 forecastJRing: [Double] = [],
                 notifiedSevereEpisodeId: String = "",
                 lastPersistMinute: Int = 0,
-                notifyDelivery: String = "") {
+                lastPersistObsMinute: Int = 0,
+                notifyDelivery: String = "",
+                safetyFirstUnix: Int = 0,
+                safetyExtreme: Double = 0,
+                safetyChannel: String = "") {
         self.episodeId = episodeId
         self.consecutiveMismatchTicks = consecutiveMismatchTicks
         self.lastNotifiedAt = lastNotifiedAt
@@ -228,6 +242,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         self.quietAbsSpO2 = quietAbsSpO2
         self.quietN = quietN
         self.lastForecastUnix = lastForecastUnix
+        self.lastForecastHorizonUnix = lastForecastHorizonUnix
         self.forecastStudentOk = forecastStudentOk
         self.quietJointEma = quietJointEma
         self.lastReconEnergy = lastReconEnergy
@@ -269,7 +284,11 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         self.forecastJRing = forecastJRing
         self.notifiedSevereEpisodeId = notifiedSevereEpisodeId
         self.lastPersistMinute = lastPersistMinute
+        self.lastPersistObsMinute = lastPersistObsMinute
         self.notifyDelivery = notifyDelivery
+        self.safetyFirstUnix = safetyFirstUnix
+        self.safetyExtreme = safetyExtreme
+        self.safetyChannel = safetyChannel
     }
 
     public init(from decoder: Decoder) throws {
@@ -301,6 +320,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         quietAbsSpO2 = try c.decodeIfPresent(Double.self, forKey: .quietAbsSpO2) ?? 0
         quietN = try c.decodeIfPresent(Int.self, forKey: .quietN) ?? 0
         lastForecastUnix = try c.decodeIfPresent(Int.self, forKey: .lastForecastUnix) ?? 0
+        lastForecastHorizonUnix = try c.decodeIfPresent([Int].self, forKey: .lastForecastHorizonUnix) ?? []
         forecastStudentOk = try c.decodeIfPresent(Bool.self, forKey: .forecastStudentOk) ?? false
         quietJointEma = try c.decodeIfPresent(Double.self, forKey: .quietJointEma) ?? 0
         lastReconEnergy = try c.decodeIfPresent(Double.self, forKey: .lastReconEnergy) ?? 0
@@ -345,7 +365,11 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         forecastJRing = try c.decodeIfPresent([Double].self, forKey: .forecastJRing) ?? []
         notifiedSevereEpisodeId = try c.decodeIfPresent(String.self, forKey: .notifiedSevereEpisodeId) ?? ""
         lastPersistMinute = try c.decodeIfPresent(Int.self, forKey: .lastPersistMinute) ?? 0
+        lastPersistObsMinute = try c.decodeIfPresent(Int.self, forKey: .lastPersistObsMinute) ?? 0
         notifyDelivery = try c.decodeIfPresent(String.self, forKey: .notifyDelivery) ?? ""
+        safetyFirstUnix = try c.decodeIfPresent(Int.self, forKey: .safetyFirstUnix) ?? 0
+        safetyExtreme = try c.decodeIfPresent(Double.self, forKey: .safetyExtreme) ?? 0
+        safetyChannel = try c.decodeIfPresent(String.self, forKey: .safetyChannel) ?? ""
     }
 
     public mutating func resetSessionAbsOnly() {
@@ -442,6 +466,9 @@ public struct WatchdogResult: Equatable, Sendable, Codable {
     public var eventExplained: Bool
     /// student | hold | inject. Production never sets inject or official.
     public var forecastSource: String
+    /// Same door as the live card **Off**: candidate+ / safety / personal-off. Not Layer 1 HOW OFF.
+    public var liveOff: Bool
+    public var personalOff: Bool
 }
 
 public enum Watchdog {
@@ -466,6 +493,7 @@ public enum Watchdog {
         switch window {
         case .failure(let reason):
             carry.consecutiveMismatchTicks = 0
+            rememberSafety(hit: nil, nowUnix: nowUnix, carry: &carry)
             return unavailable(reason, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: carry)
         case .success(let raw):
             var rawWin = raw
@@ -481,12 +509,13 @@ public enum Watchdog {
                 openTail = WatchdogLiveTail.resolve(rawWin)
             }
             if let reason = WatchdogQuality.gate(rawWin, tail: openTail) {
-                carry.consecutiveMismatchTicks = 0
                 if reason != .wristOff, safetyCap(window: rawWin) {
                     return safetyDuringQualityFail(window: rawWin, nowUnix: nowUnix,
                                                    interval: liveIntervalMinutes, carry: carry,
                                                    liveAlerts: liveAlerts)
                 }
+                carry.consecutiveMismatchTicks = 0
+                rememberSafety(hit: nil, nowUnix: nowUnix, carry: &carry)
                 return unavailable(reason, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: carry)
             }
             let win = openTail.applyLookbacks(rawWin)
@@ -503,6 +532,12 @@ public enum Watchdog {
             do {
                 residual = try UniTSRuntime().reconstruct(modelWin, prompt: livePrompt, tail: openTail)
             } catch {
+                if safetyCap(window: win) {
+                    return safetyDuringQualityFail(window: win, nowUnix: nowUnix,
+                                                   interval: liveIntervalMinutes, carry: carry,
+                                                   liveAlerts: liveAlerts)
+                }
+                rememberSafety(hit: nil, nowUnix: nowUnix, carry: &carry)
                 return unavailable(.empty, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: carry)
             }
             return combine(window: modelWin, residual: residual, prompt: livePrompt, evaluations: evaluations,
@@ -510,6 +545,37 @@ public enum Watchdog {
                            sleepSessionOpen: sleepSessionOpen, skipForecast: skipForecast,
                            liveAlerts: liveAlerts)
         }
+    }
+
+    /// Yesterday’s confounder only while that sleep session is still open.
+    public static func liveDayLog(today: LBDayLog?, yesterday: LBDayLog?, sleepOpen: Bool) -> LBDayLog? {
+        if today?.confoundsUsual == true { return today }
+        if sleepOpen, yesterday?.confoundsUsual == true { return yesterday }
+        return today
+    }
+
+    /// Live card **Off**. Same door as severity / safety / personal-off. Not a painted-band leftover.
+    public static func liveOff(severity: WatchdogSeverity, safety: Bool, personalOff: Bool) -> Bool {
+        if safety { return true }
+        if personalOff { return true }
+        switch severity {
+        case .candidate, .active, .severe: return true
+        case .withinLimits, .note, .dataUnavailable: return false
+        }
+    }
+
+    public static func liveOff(_ result: WatchdogResult) -> Bool { result.liveOff }
+
+    /// Band / tape / IMU may learn. Detection already ran in `evaluate`.
+    public static func shouldTrainUsual(result: WatchdogResult, dayLog: LBDayLog?) -> Bool {
+        guard result.unavailable == nil else { return false }
+        switch result.severity {
+        case .candidate, .active, .severe, .dataUnavailable:
+            return false
+        case .withinLimits, .note:
+            break
+        }
+        return dayLog?.confoundsUsual != true
     }
 
     public enum WatchdogInject: String, Sendable {
@@ -609,6 +675,7 @@ public enum Watchdog {
             if let r = rawR[k] { absR[k] = abs(r) }
         }
         let safety = WatchdogSafety.fired(window)
+        rememberSafety(hit: safetyHit(window: window), nowUnix: nowUnix, carry: &carry)
         let previousSafety = carry.lastSafety
         let previousFused = carry.lastJointEnergy
         let eHR = tail.energy(obs: window.hr, hat: adapted.reconstructedHR,
@@ -715,17 +782,22 @@ public enum Watchdog {
         if eSpO2 >= WatchdogCalibration.tNote { hot.append("SpO2") }
         let personalOff = evaluations.contains {
             $0.alertEligible && LongitudinalBaseline.isOffUsual(z: $0.zLong, k: $0.kBandUsed)
-        } || personalNativeOff(hrvMs: lastHRV?.obs, evaluations: evaluations)
+        } || personalNativeOff(hrBpm: lastHR?.obs, hrvMs: lastHRV?.obs, evaluations: evaluations)
         let persistMinute = nowUnix - nowUnix % WatchdogConfig.gridSeconds
-        if persistMinute > carry.lastPersistMinute {
+        let obsMinute = latestValidObsMinute(window: window)
+        if persistMinute > carry.lastPersistMinute,
+           let obs = obsMinute, obs > carry.lastPersistObsMinute {
             if reconJ >= WatchdogCalibration.tNote || personalOff {
                 carry.consecutiveMismatchTicks += 1
                 carry.consecutiveInRangeTicks = 0
+                carry.consecutiveQuietTicks = 0
             } else {
                 carry.consecutiveMismatchTicks = 0
                 carry.consecutiveInRangeTicks += 1
+                carry.consecutiveQuietTicks = carry.consecutiveInRangeTicks
             }
             carry.lastPersistMinute = persistMinute
+            carry.lastPersistObsMinute = obs
         }
         let persistTicks = carry.consecutiveMismatchTicks
 
@@ -763,7 +835,9 @@ public enum Watchdog {
                                                             recon: reconJ, previousRecon: previousFused,
                                                             eventLabel: eventHint,
                                                             episodeId: carry.episodeId,
-                                                            notifiedSevereEpisodeId: carry.notifiedSevereEpisodeId)
+                                                            notifiedSevereEpisodeId: carry.notifiedSevereEpisodeId,
+                                                            lastNotifiedAt: carry.lastNotifiedAt,
+                                                            nowUnix: nowUnix)
         let allowNotify = notify && liveAlerts
         if allowNotify {
             carry.lastNotifiedAt = nowUnix
@@ -782,6 +856,9 @@ public enum Watchdog {
             carry.lastForecastResp = forecast.nextResp
             carry.lastForecastRHR = forecast.nextRHR
             carry.lastForecastSpO2 = forecast.nextSpO2
+            if forecast.horizonUnix.count == WatchdogCalibration.forecastHorizon {
+                carry.lastForecastHorizonUnix = forecast.horizonUnix
+            }
         } else {
             carry.forecastStudentOk = false
         }
@@ -886,7 +963,6 @@ public enum Watchdog {
             }
             let sessionKey = WatchdogPhaseKey(phase: sessionPhase, family: .still)
             carry.sessionLastUnix = nowUnix
-            carry.sessionKeyTicks[sessionKey.id, default: 0] += 1
             var keyed = carry.sessionNativeByKey[sessionKey.id] ?? Array(repeating: 0, count: 6)
             var keyedCount = carry.sessionNativeCountByKey[sessionKey.id] ?? Array(repeating: 0, count: 6)
             if keyed.count < 6 { keyed = Array(repeating: 0, count: 6) }
@@ -904,15 +980,26 @@ public enum Watchdog {
             }
             carry.sessionNativeByKey[sessionKey.id] = keyed
             carry.sessionNativeCountByKey[sessionKey.id] = keyedCount
-            carry.sessionN += 1
-            carry.sessionNativeN += 1
+            let advanced = (0..<6).contains { $0 < carry.lastNativeMinute.count
+                && $0 < priorMinute.count && carry.lastNativeMinute[$0] > priorMinute[$0] }
+            if advanced {
+                carry.sessionN += 1
+                carry.sessionNativeN += 1
+                carry.sessionKeyTicks[sessionKey.id, default: 0] += 1
+            }
             carry.sessionUnix = nowUnix
         }
         var bandState = carry.bandByKey[phaseKey.id] ?? .empty
         var bandGain: [Double]
+        let seriesForMinutes: [[Double?]] = [window.hr, window.rhr, window.hrv,
+                                             window.temp, window.resp, window.spo2]
+        let sampleMinute = seriesForMinutes.map {
+            WatchdogQuality.lastFiniteMinuteUnix($0, startUnix: window.startUnix) ?? 0
+        }
         if WatchdogBand.learnable(eventHint), bandFam != .other {
             bandGain = WatchdogBand.update(&bandState, absResidual: absR, eligible: bandLearn,
-                                          nowUnix: nowUnix, present: present)
+                                          nowUnix: nowUnix, present: present,
+                                          sampleMinute: sampleMinute)
             carry.bandByKey[phaseKey.id] = bandState
             carry.mirrorBand(bandState, key: phaseKey.id)
         } else {
@@ -922,16 +1009,30 @@ public enum Watchdog {
         if bandState.ready {
             if carry.sessionN >= 8 {
                 for k in 0..<6 {
+                    guard WatchdogBand.channelReady(bandState, k) else { continue }
+                    guard k < carry.sessionAbs.count else { continue }
                     let g = min(1.05, max(0.95, 1.0 + 0.02 * (carry.sessionAbs[k] - 0.4)))
                     bandGain[k] = min(WatchdogBand.clampHi, max(WatchdogBand.clampLo, bandGain[k] * g))
                 }
             }
-            adapted.scaleHR = WatchdogBand.apply([bandGain[0]], to: adapted.scaleHR)
-            adapted.scaleRHR = WatchdogBand.apply([bandGain[1]], to: adapted.scaleRHR)
-            adapted.scaleHRV = WatchdogBand.apply([bandGain[2]], to: adapted.scaleHRV)
-            adapted.scaleTemp = WatchdogBand.apply([bandGain[3]], to: adapted.scaleTemp)
-            adapted.scaleResp = WatchdogBand.apply([bandGain[4]], to: adapted.scaleResp)
-            adapted.scaleSpO2 = WatchdogBand.apply([bandGain[5]], to: adapted.scaleSpO2)
+            if WatchdogBand.channelReady(bandState, 0) {
+                adapted.scaleHR = WatchdogBand.apply([bandGain[0]], to: adapted.scaleHR)
+            }
+            if WatchdogBand.channelReady(bandState, 1) {
+                adapted.scaleRHR = WatchdogBand.apply([bandGain[1]], to: adapted.scaleRHR)
+            }
+            if WatchdogBand.channelReady(bandState, 2) {
+                adapted.scaleHRV = WatchdogBand.apply([bandGain[2]], to: adapted.scaleHRV)
+            }
+            if WatchdogBand.channelReady(bandState, 3) {
+                adapted.scaleTemp = WatchdogBand.apply([bandGain[3]], to: adapted.scaleTemp)
+            }
+            if WatchdogBand.channelReady(bandState, 4) {
+                adapted.scaleResp = WatchdogBand.apply([bandGain[4]], to: adapted.scaleResp)
+            }
+            if WatchdogBand.channelReady(bandState, 5) {
+                adapted.scaleSpO2 = WatchdogBand.apply([bandGain[5]], to: adapted.scaleSpO2)
+            }
         }
         adapted.rangeHalf[.hr] = adapted.scaleHR.last ?? adapted.rangeHalf[.hr] ?? 0
         adapted.rangeHalf[.rhr] = adapted.scaleRHR.last ?? adapted.rangeHalf[.rhr] ?? 0
@@ -1048,7 +1149,7 @@ public enum Watchdog {
             rangeSpO2: adapted.scaleSpO2,
             signals: signals,
             contributing: hot,
-            qualityLine: String(format: "Coverage %.0f%% · %@ · %@ · tick %ds",
+            qualityLine: String(format: "HR fill %.0f%% · %@ · %@ · tick %ds",
                                 window.coverage * 100,
                                 WatchdogActivityRuntime.displayName(
                                     WatchdogActivityClass.labels(logits: window.activityLogits).last ?? "unknown"),
@@ -1077,7 +1178,9 @@ public enum Watchdog {
             calibrationSource: WatchdogCalibration.version,
             cutReason: decision.cutReason,
             eventExplained: decision.explained,
-            forecastSource: forecast.source
+            forecastSource: forecast.source,
+            liveOff: liveOff(severity: severity, safety: safety, personalOff: personalOff),
+            personalOff: personalOff
         )
     }
 
@@ -1106,7 +1209,7 @@ public enum Watchdog {
         return 0
     }
 
-    /// Coverage for a sparse vital: 1 when this reading is still paired, else that series’ own fill.
+    /// Coverage for a sparse vital: fresh finite minutes / strip length. One pair is never 1.0.
     static func sparseCoverage(_ series: [Double?], startUnix: Int, nowUnix: Int,
                                channel: Int, family: DeviceFamily) -> Double {
         guard !series.isEmpty else { return 0 }
@@ -1121,17 +1224,39 @@ public enum Watchdog {
         return Double(fresh) / Double(series.count)
     }
 
-    /// Last fresh RMSSD vs an established Layer 1 HRV copy. Independent of UniTS hat.
+    /// Last fresh native vs the **stable** matching usual (logged-ill freeze / long). Not the walking 7-day, not the hat.
+    static func personalReference(_ ev: LBEvaluation) -> (center: Double, spread: Double, k: Double)? {
+        if let f = ev.usualFreeze, f.spreadLong > 0 {
+            return (f.centerLong, f.spreadLong, ev.kBandUsed)
+        }
+        if ev.establishedLong || ev.showLong,
+           let c = ev.copyLong?.center, let s = ev.copyLong?.spread, s > 0 {
+            return (c, s, ev.kBandUsed)
+        }
+        return nil
+    }
+
     static func personalNativeOff(hrvMs: Double?, evaluations: [LBEvaluation]) -> Bool {
-        guard let hrvMs, hrvMs > 0 else { return false }
-        for series in [LBSeries.awakeRestHRVLn, .sleepHRVLn, .continuousHRVLn] {
-            guard let ev = evaluations.first(where: { $0.series == series }), ev.establishedLong,
-                  let math = LongitudinalBaseline.toMath(hrvMs, series: series) else { continue }
-            let center = ev.copyLong?.center ?? ev.copy7?.center
-            let spread = ev.copyLong?.spread ?? ev.copy7?.spread
-            guard let center, let spread, spread > 0 else { continue }
-            let z = (math - center) / spread
-            if LongitudinalBaseline.isOffUsual(z: z, k: ev.kBandUsed) { return true }
+        personalNativeOff(hrBpm: nil, hrvMs: hrvMs, evaluations: evaluations)
+    }
+
+    static func personalNativeOff(hrBpm: Double?, hrvMs: Double?, evaluations: [LBEvaluation]) -> Bool {
+        if let hrvMs, hrvMs > 0 {
+            for series in [LBSeries.awakeRestHRVLn, .sleepHRVLn, .continuousHRVLn] {
+                guard let ev = evaluations.first(where: { $0.series == series }),
+                      let ref = personalReference(ev),
+                      let math = LongitudinalBaseline.toMath(hrvMs, series: series) else { continue }
+                let z = (math - ref.center) / ref.spread
+                if LongitudinalBaseline.isOffUsual(z: z, k: ref.k) { return true }
+            }
+        }
+        if let hrBpm, hrBpm > 0 {
+            for series in [LBSeries.awakeRestHR, .sleepRHR, .continuousHR] {
+                guard let ev = evaluations.first(where: { $0.series == series }),
+                      let ref = personalReference(ev) else { continue }
+                let z = (hrBpm - ref.center) / ref.spread
+                if LongitudinalBaseline.isOffUsual(z: z, k: ref.k) { return true }
+            }
         }
         return false
     }
@@ -1198,8 +1323,13 @@ public enum Watchdog {
     }
 
     static func safetyCap(window: WatchdogWindow) -> Bool {
+        safetyHit(window: window) != nil
+    }
+
+    /// Fresh still-rest extrema, not the minute mean and not a UniTS residual.
+    static func safetyHit(window: WatchdogWindow) -> (channel: String, value: Double)? {
         let tail = WatchdogLiveTail.resolve(window)
-        guard confirmedStillForRestSafety(window) else { return false }
+        guard confirmedStillForRestSafety(window) else { return nil }
         func freshLast(_ xs: [Double?], channel: Int) -> Double? {
             guard WatchdogQuality.channelFresh(xs, startUnix: window.startUnix, nowUnix: window.nowUnix,
                                               channel: channel, family: window.family) else {
@@ -1207,18 +1337,45 @@ public enum Watchdog {
             }
             return tail.last(xs)
         }
-        if let hr = freshLast(window.hr, channel: 0), hr > WatchdogConfig.restHrHigh { return true }
-        if let hr = freshLast(window.hr, channel: 0), hr > 0, hr < WatchdogConfig.restHrLow { return true }
-        if let t = freshLast(window.temp, channel: 3), t < WatchdogConfig.tempLowC || t > WatchdogConfig.tempHighC { return true }
-        if let r = freshLast(window.resp, channel: 4), r < WatchdogConfig.respLow || r > WatchdogConfig.respHigh { return true }
-        if let h = freshLast(window.hrv, channel: 2), h > 0, h < WatchdogConfig.rmssdLow || h > WatchdogConfig.rmssdHigh { return true }
-        return false
+        let highHR = window.hrMax.count == window.hr.count ? window.hrMax : window.hr
+        let lowHR = window.hrMin.count == window.hr.count ? window.hrMin : window.hr
+        if let hr = freshLast(highHR, channel: 0), hr > WatchdogConfig.restHrHigh {
+            return ("HR", hr)
+        }
+        if let hr = freshLast(lowHR, channel: 0), hr > 0, hr < WatchdogConfig.restHrLow {
+            return ("HR", hr)
+        }
+        if let t = freshLast(window.temp, channel: 3), t < WatchdogConfig.tempLowC || t > WatchdogConfig.tempHighC {
+            return ("Temp", t)
+        }
+        if let r = freshLast(window.resp, channel: 4), r < WatchdogConfig.respLow || r > WatchdogConfig.respHigh {
+            return ("Resp", r)
+        }
+        if let h = freshLast(window.hrv, channel: 2), h > 0,
+           h < WatchdogConfig.rmssdLow || h > WatchdogConfig.rmssdHigh {
+            return ("HRV", h)
+        }
+        return nil
+    }
+
+    static func rememberSafety(hit: (channel: String, value: Double)?, nowUnix: Int,
+                               carry: inout WatchdogCarry) {
+        if let hit {
+            if carry.safetyFirstUnix == 0 { carry.safetyFirstUnix = nowUnix }
+            carry.safetyChannel = hit.channel
+            carry.safetyExtreme = hit.value
+        } else {
+            carry.safetyFirstUnix = 0
+            carry.safetyChannel = ""
+            carry.safetyExtreme = 0
+        }
     }
 
     /// Thin UniTS window still pages when a fresh still-rest vital is out of range.
     static func safetyDuringQualityFail(window: WatchdogWindow, nowUnix: Int, interval: Int,
                                         carry: WatchdogCarry, liveAlerts: Bool) -> WatchdogResult {
         var carry = carry
+        rememberSafety(hit: safetyHit(window: window), nowUnix: nowUnix, carry: &carry)
         carry.lastSafety = true
         carry.consecutiveQuietTicks = 0
         if carry.episodeId == nil {
@@ -1237,7 +1394,7 @@ public enum Watchdog {
             episodeState: .active,
             episodeId: carry.episodeId,
             headline: "This stretch is far from your usual.",
-            episodeLine: "Severe · safety · coverage incomplete · not a diagnosis",
+            episodeLine: safetyEpisodeLine(nowUnix: nowUnix, carry: carry),
             monitoringCurrent: window.newestAgeSeconds <= 180,
             monitoringLabel: window.newestAgeSeconds <= 180 ? "CURRENT" : "WAITING",
             mode: "live",
@@ -1289,8 +1446,27 @@ public enum Watchdog {
             calibrationSource: WatchdogCalibration.version,
             cutReason: "safety",
             eventExplained: false,
-            forecastSource: "hold"
+            forecastSource: "hold",
+            liveOff: true,
+            personalOff: false
         )
+    }
+
+    static func safetyEpisodeLine(nowUnix: Int, carry: WatchdogCarry) -> String {
+        let held = carry.safetyFirstUnix > 0 ? max(0, nowUnix - carry.safetyFirstUnix) : 0
+        let heldBit = held > 0 ? " · held \(held)s" : ""
+        let ch = carry.safetyChannel.isEmpty ? "" : " · \(carry.safetyChannel)"
+        return "Severe · safety\(ch)\(heldBit) · coverage incomplete · not a diagnosis"
+    }
+
+    static func latestValidObsMinute(window: WatchdogWindow) -> Int? {
+        var best: Int?
+        for xs in [window.hr, window.rhr, window.hrv, window.temp, window.resp, window.spo2] {
+            if let t = WatchdogQuality.lastFiniteMinuteUnix(xs, startUnix: window.startUnix) {
+                best = max(best ?? t, t)
+            }
+        }
+        return best
     }
 
     /// Rest-HR extrema page only in the current rest tail. Effort minutes in the same strip do not count.
@@ -1319,18 +1495,14 @@ public enum Watchdog {
             state = .active
         case .note:
             if open.contains(prior ?? .withinLimits) {
-                carry.consecutiveQuietTicks += 1
-                state = carry.consecutiveQuietTicks >= 2 ? .resolved : .recovering
+                state = carry.consecutiveInRangeTicks >= 2 ? .resolved : .recovering
             } else {
-                carry.consecutiveQuietTicks = 0
                 state = .withinLimits
             }
         case .withinLimits:
             if open.contains(prior ?? .withinLimits) {
-                carry.consecutiveQuietTicks += 1
-                state = carry.consecutiveQuietTicks >= 2 ? .resolved : .recovering
+                state = carry.consecutiveInRangeTicks >= 2 ? .resolved : .recovering
             } else {
-                carry.consecutiveQuietTicks = 0
                 state = .withinLimits
             }
         }
@@ -1348,7 +1520,7 @@ public enum Watchdog {
                         confounded: Bool) -> (headline: String, episodeLine: String) {
         if state == .recovering {
             return ("This stretch is settling toward your usual.",
-                    "Recovering · waiting for two quiet ticks · not a diagnosis")
+                    "Recovering · waiting for two quiet minutes · not a diagnosis")
         }
         if state == .resolved {
             return ("This stretch looks like you.",
@@ -1450,7 +1622,9 @@ public enum Watchdog {
             calibrationSource: WatchdogCalibration.version,
             cutReason: "quality",
             eventExplained: false,
-            forecastSource: "hold"
+            forecastSource: "hold",
+            liveOff: false,
+            personalOff: false
         )
     }
 

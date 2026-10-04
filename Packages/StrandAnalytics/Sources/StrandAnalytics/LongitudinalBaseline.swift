@@ -265,6 +265,10 @@ public struct LBCarry: Equatable, Sendable {
     public var slopeLong: Double?
     public var slopeUsable: Bool
     public var longOriginEpoch: Int?
+    /// Logged felt-ill snapshot for Watchdog personal-off. Not a treatment freeze.
+    public var usualFreeze: LBUsualFreeze? = nil
+    public var usualEpochStart: Int? = nil
+    public var weekOffStreak: Int = 0
 
     public init(center7: Double? = nil, spread7: Double? = nil,
                 centerLong: Double? = nil, spreadLong: Double? = nil,
@@ -273,7 +277,10 @@ public struct LBCarry: Equatable, Sendable {
                 runLength: Int = 0, recentZLong: [Double] = [],
                 lastQualityOKEpoch: Int? = nil,
                 slopeLong: Double? = nil, slopeUsable: Bool = false,
-                longOriginEpoch: Int? = nil) {
+                longOriginEpoch: Int? = nil,
+                usualFreeze: LBUsualFreeze? = nil,
+                usualEpochStart: Int? = nil,
+                weekOffStreak: Int = 0) {
         self.center7 = center7
         self.spread7 = spread7
         self.centerLong = centerLong
@@ -288,9 +295,40 @@ public struct LBCarry: Equatable, Sendable {
         self.slopeLong = slopeLong
         self.slopeUsable = slopeUsable
         self.longOriginEpoch = longOriginEpoch
+        self.usualFreeze = usualFreeze
+        self.usualEpochStart = usualEpochStart
+        self.weekOffStreak = weekOffStreak
     }
 
     public static let empty = LBCarry()
+}
+
+/// Frozen when-well copy after a **logged** felt-ill onset. Snapshot only — Layer 1
+/// centers still skip-and-hold. Does not name a drug or infer a treatment start.
+public struct LBUsualFreeze: Equatable, Sendable {
+    public var t0CivilDay: String
+    public var tFreeze: String
+    public var reason: String
+    public var version: Int
+    public var centerLong: Double
+    public var spreadLong: Double
+    public var center7: Double
+    public var spread7: Double
+
+    public static let loggedIll = "logged_ill"
+    public static let weekOffLong = "week_off_long"
+
+    public init(t0CivilDay: String, tFreeze: String, reason: String, version: Int,
+                centerLong: Double, spreadLong: Double, center7: Double, spread7: Double) {
+        self.t0CivilDay = t0CivilDay
+        self.tFreeze = tFreeze
+        self.reason = reason
+        self.version = version
+        self.centerLong = centerLong
+        self.spreadLong = spreadLong
+        self.center7 = center7
+        self.spread7 = spread7
+    }
 }
 
 // MARK: - Snapshots
@@ -389,6 +427,8 @@ public struct LBEvaluation: Equatable, Sendable {
     public var trial: LBTrialEvaluation = .none
     /// Optional “what else is going on?” for Phase C. Never a daily chore; never required to score.
     public var contextPrompt: LBOutOfBoundsPrompt = .silent
+    /// Pre-illness snapshot after a logged felt-ill. Nil unless they logged it.
+    public var usualFreeze: LBUsualFreeze? = nil
 
     /// LABEL: human-readable math dump
     /// One block you can print after a test failure to see both copies, gap, CUSUM, and confidence.
@@ -758,18 +798,32 @@ public enum LongitudinalBaseline {
                                                   provenance: trial.provenanceNow)
             }
         }
-        let epochStart: Int? = request.freeze.flatMap { isoEpochDay($0.t0CivilDay) }
-
+        let trialEpoch: Int? = request.freeze.flatMap { isoEpochDay($0.t0CivilDay) }
+        var illnessFreeze: LBUsualFreeze? = nil
+        if trialEpoch == nil,
+           let onset = firstFeltIllOnset(dayLogs: request.dayLogsByDay, through: t),
+           let freezeDay = freezeAsOfDay(t0CivilDay: onset), freezeDay < t {
+            let preReq = LBTrialRequest(dayLogsByDay: request.dayLogsByDay)
+            let pre = evaluate(asOf: freezeDay, series: series, observations: observations,
+                               replay: true, trial: preReq)
+            if qualifyReasons(pre: pre, observations: observations).isEmpty,
+               let bundle = makeUsualFreeze(pre: pre, t0CivilDay: onset, reason: LBUsualFreeze.loggedIll) {
+                illnessFreeze = bundle
+            }
+        }
         let scored: LBEvaluation
         if replay {
             let epochs = byDay.keys.sorted()
             let startDay = epochs.first ?? tEpoch
             var state = carry
+            if let bundle = illnessFreeze {
+                state.usualFreeze = bundle
+            }
             var last = emptyEvaluation(asOf: t, series: series, carry: carry)
             var d = startDay
             var resetEpoch = false
             while d <= tEpoch {
-                if let es = epochStart, d >= es, !resetEpoch {
+                if let es = trialEpoch, d >= es, !resetEpoch {
                     state.centerLong = nil
                     state.spreadLong = nil
                     state.nLong = 0
@@ -777,19 +831,31 @@ public enum LongitudinalBaseline {
                     state.cusumS = 0
                     resetEpoch = true
                 }
-                let es = epochStart.flatMap { d >= $0 ? epochStart : nil }
+                let es = trialEpoch.flatMap { d >= $0 ? trialEpoch : nil }
                 last = scoreOneDay(tEpoch: d, series: series, byDay: byDay, carry: state,
                                    epochStart: es, dayLogs: request.dayLogsByDay)
-                state = last.carry
+                var next = last.carry
+                next.usualFreeze = state.usualFreeze
+                last.carry = next
+                last.usualFreeze = next.usualFreeze
+                state = next
                 d += 1
             }
             scored = last
         } else {
-            let es = epochStart.flatMap { tEpoch >= $0 ? epochStart : nil }
-            scored = scoreOneDay(tEpoch: tEpoch, series: series, byDay: byDay, carry: carry,
-                                 epochStart: es, dayLogs: request.dayLogsByDay)
+            var state = carry
+            if let bundle = illnessFreeze {
+                state.usualFreeze = bundle
+            }
+            let es = trialEpoch.flatMap { tEpoch >= $0 ? trialEpoch : nil }
+            var one = scoreOneDay(tEpoch: tEpoch, series: series, byDay: byDay, carry: state,
+                                  epochStart: es, dayLogs: request.dayLogsByDay)
+            one.carry.usualFreeze = state.usualFreeze
+            one.usualFreeze = state.usualFreeze
+            scored = one
         }
         var out = scored
+        out.usualFreeze = scored.carry.usualFreeze ?? illnessFreeze
         out.trial = attachTrial(to: scored, request: request, observations: observations,
                                 qualifyReasons: reasons)
         if out.trial.phase != .none, !out.trial.trialFreezeOk {
@@ -1185,7 +1251,7 @@ public enum LongitudinalBaseline {
         }
         longEpochs = longEpochs.filter { nightIsClean($0, dayLogs: dayLogs) }
         let longTrain = mathValues(epochs: longEpochs, byDay: byDay, series: series)
-        let nLongLowQ = countStatus(epochs: longEpochs, byDay: byDay, status: .lowQuality)
+        var nLongLowQ = countStatus(epochs: longEpochs, byDay: byDay, status: .lowQuality)
         let trim = trimLongList(longTrain, floor: spec.floor)
         let trimKeptFrac: Double? = longTrain.isEmpty ? nil : trim.keptFrac
         let twoBlockShift = twoBlockMedianShift(longTrain)
@@ -1201,18 +1267,21 @@ public enum LongitudinalBaseline {
             centerLong = med
             spreadLong = robustSpread(values: trim.kept, center: med, floor: spec.floor)
             nLong = trim.kept.count
-            lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series)
+            lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series,
+                                       dayLogs: dayLogs)
         } else if let med = median(longTrain), longTrain.count >= Params.nLongShow {
             centerLong = med
             spreadLong = robustSpread(values: longTrain, center: med, floor: spec.floor)
             nLong = longTrain.count
-            lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series)
+            lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series,
+                                       dayLogs: dayLogs)
         } else if let heldC = carry.centerLong, let heldS = carry.spreadLong {
             centerLong = heldC
             spreadLong = heldS
             nLong = carry.nLong
             longHeld = true
-            lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series)
+            lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series,
+                                       dayLogs: dayLogs)
         }
 
         let longPairsAll: [(epoch: Int, value: Double)] = longEpochs.compactMap { e in
@@ -1236,6 +1305,17 @@ public enum LongitudinalBaseline {
                     spreadLong = robustSpread(values: matched.map(\.value), center: med, floor: spec.floor)
                     nLong = matched.count
                 }
+                lastOK = lastQualityOKEpoch(byDay: byDay, series: series, through: tEpoch,
+                                            dayLogs: dayLogs, habit: habitToday)
+                stale = {
+                    guard let lastOK else { return true }
+                    return tEpoch - lastOK > Params.staleDays
+                }()
+                lastLongUpdate = longPairs.last.map { isoFromEpochDay($0.epoch) }
+                let habitEpochs = longEpochs.filter {
+                    habitMatches($0, habit: habitToday, dayLogs: dayLogs)
+                }
+                nLongLowQ = countStatus(epochs: habitEpochs, byDay: byDay, status: .lowQuality)
             }
         }
         if longHeld, let iso = lastLongUpdate, let heldEpoch = isoEpochDay(iso) {
@@ -1483,7 +1563,8 @@ public enum LongitudinalBaseline {
         let bandCenterLong = expectedToday ?? centerLong
         let copy7 = show7 ? copySnapshot(center: center7, spread: spread7, n: n7,
                                          coverageDenom: Double(p.span7),
-                                         lastUpdate: lastUpdate(epochs: weekEpochs, byDay: byDay, series: series),
+                                         lastUpdate: lastUpdate(epochs: weekEpochs, byDay: byDay, series: series,
+                                                                dayLogs: dayLogs),
                                          version: Params.version7, held: weekHeld, z: z7, k: kUsed) : nil
         let copyLong = showLong ? copySnapshot(center: bandCenterLong, spread: spreadLong, n: nLong,
                                                coverageDenom: Double(Params.longSlots),
@@ -1695,19 +1776,50 @@ public enum LongitudinalBaseline {
         epochs.filter { byDay[$0]?.qualityStatus == status }.count
     }
 
-    static func lastUpdate(epochs: [Int], byDay: [Int: LBDailyObservation], series: LBSeries) -> String? {
+    static func habitMatches(_ epoch: Int, habit: LBHabitClass?,
+                             dayLogs: [String: LBDayLog]) -> Bool {
+        guard let habit, habit == .rest || habit == .trained else { return true }
+        return (dayLogs[isoFromEpochDay(epoch)]?.habitClass ?? .unspecified) == habit
+    }
+
+    static func lastUpdate(epochs: [Int], byDay: [Int: LBDailyObservation], series: LBSeries,
+                           dayLogs: [String: LBDayLog] = [:]) -> String? {
         for e in epochs.reversed() {
-            if trainableMath(byDay[e], series: series) != nil {
+            if nightIsClean(e, dayLogs: dayLogs), trainableMath(byDay[e], series: series) != nil {
                 return isoFromEpochDay(e)
             }
         }
         return nil
     }
 
+    static func firstFeltIllOnset(dayLogs: [String: LBDayLog], through t: String) -> String? {
+        guard let tEpoch = isoEpochDay(t) else { return nil }
+        var onset: String?
+        let epochs = dayLogs.keys.compactMap(isoEpochDay).filter { $0 <= tEpoch }.sorted()
+        guard let first = epochs.first, first <= tEpoch else { return nil }
+        for e in first...tEpoch {
+            let day = isoFromEpochDay(e)
+            let ill = dayLogs[day]?.feltIll == true
+            let prevIll = dayLogs[isoFromEpochDay(e - 1)]?.feltIll == true
+            if ill && !prevIll { onset = day }
+        }
+        return onset
+    }
+
+    static func makeUsualFreeze(pre: LBEvaluation, t0CivilDay: String, reason: String) -> LBUsualFreeze? {
+        guard let cl = pre.copyLong?.center, let sl = pre.copyLong?.spread,
+              let c7 = pre.copy7?.center, let s7 = pre.copy7?.spread else { return nil }
+        return LBUsualFreeze(t0CivilDay: t0CivilDay, tFreeze: pre.asOf, reason: reason, version: 2,
+                             centerLong: cl, spreadLong: sl, center7: c7, spread7: s7)
+    }
+
     static func lastQualityOKEpoch(byDay: [Int: LBDailyObservation], series: LBSeries, through t: Int,
-                                  dayLogs: [String: LBDayLog] = [:]) -> Int? {
+                                  dayLogs: [String: LBDayLog] = [:],
+                                  habit: LBHabitClass? = nil) -> Int? {
         byDay.keys.filter {
-            $0 <= t && trainableMath(byDay[$0], series: series) != nil && nightIsClean($0, dayLogs: dayLogs)
+            $0 <= t && trainableMath(byDay[$0], series: series) != nil
+                && nightIsClean($0, dayLogs: dayLogs)
+                && habitMatches($0, habit: habit, dayLogs: dayLogs)
         }.max()
     }
 

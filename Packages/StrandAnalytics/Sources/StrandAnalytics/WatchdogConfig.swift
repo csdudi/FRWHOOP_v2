@@ -9,8 +9,8 @@ public enum WatchdogConfig: Sendable {
     public static let defaultLiveIntervalMinutes = 5
     /// How often the live baseline re-reads the strap. Not a patient control; each vital picks its own lookback.
     public static let tickSeconds = 20
-    /// Episode notify is `WatchdogNotifyPolicy`. Item 7 deleted the 1800 s mute; keep 0 so old reads are honest.
-    public static let notifyCooldownSeconds = 0
+    /// Second page (escalate) of the same episode. First severe of a new id is not muted.
+    public static let notifyCooldownSeconds = 30 * 60
 
     public static let tau = 1.0
     public static let tauSevere = 2.0
@@ -86,11 +86,11 @@ public enum WatchdogConfig: Sendable {
     public static let hrvDropUncertMs = 3.04
     public static let tempGainUncert = 0.10
 
-    public static let modelVersion = "units-ad-coreml-v2"
+    public static let modelVersion = "units-ad-coreml-v3"
     public static let fallbackModelVersion = "units-ad-recon-v4"
     public static let coreMLCheckpoint = "UniTS_AD.mlpackage"
     public static let configVersion = "watchdog-v2.5"
-    public static let forecastModelVersion = "timesfm3-student-v2"
+    public static let forecastModelVersion = "timesfm3-student-v3"
     public static let activityFeatureWidth = 20
     public static let paramSet = "v1.review"
 

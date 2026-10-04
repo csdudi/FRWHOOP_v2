@@ -129,12 +129,14 @@ public struct WatchdogPhaseUsualStore: Equatable, Sendable, Codable {
             let prev = e.center
             e.center = (0..<6).map { i in
                 guard mask[i], i < e.center.count else { return i < e.center.count ? e.center[i] : 0 }
+                if e.center[i] <= 0 { return dayMedian[i] }
                 return 0.85 * e.center[i] + Self.dailyGain * dayMedian[i]
             }
             e.mad = (0..<6).map { i in
                 guard mask[i], i < e.mad.count, i < prev.count else {
                     return i < e.mad.count ? e.mad[i] : 0
                 }
+                if prev[i] <= 0 { return 0 }
                 return 0.85 * e.mad[i] + Self.dailyGain * abs(dayMedian[i] - prev[i])
             }
         }
@@ -192,6 +194,8 @@ public struct WatchdogBandState: Equatable, Sendable, Codable {
     public var lastUnix: Int
     /// Present updates per channel. Missing vitals do not train q[k] toward 0.
     public var nPresent: [Int]
+    /// Last counted civil minute (`unix / 60`) per channel. Same sparse sample is not a new n.
+    public var lastMinute: [Int]
 
     public static let empty = WatchdogBandState()
 
@@ -200,7 +204,8 @@ public struct WatchdogBandState: Equatable, Sendable, Codable {
                 n: Int = 0, ready: Bool = false,
                 scale: [Double] = Array(repeating: 1, count: 6),
                 lastUnix: Int = 0,
-                nPresent: [Int] = Array(repeating: 0, count: 6)) {
+                nPresent: [Int] = Array(repeating: 0, count: 6),
+                lastMinute: [Int] = Array(repeating: 0, count: 6)) {
         self.q = q
         self.anchor = anchor
         self.n = n
@@ -208,10 +213,11 @@ public struct WatchdogBandState: Equatable, Sendable, Codable {
         self.scale = scale
         self.lastUnix = lastUnix
         self.nPresent = nPresent
+        self.lastMinute = lastMinute
     }
 
     enum CodingKeys: String, CodingKey {
-        case q, anchor, n, ready, scale, lastUnix, nPresent
+        case q, anchor, n, ready, scale, lastUnix, nPresent, lastMinute
     }
 
     public init(from decoder: Decoder) throws {
@@ -224,6 +230,8 @@ public struct WatchdogBandState: Equatable, Sendable, Codable {
         lastUnix = try c.decodeIfPresent(Int.self, forKey: .lastUnix) ?? 0
         nPresent = try c.decodeIfPresent([Int].self, forKey: .nPresent) ?? Array(repeating: 0, count: 6)
         if nPresent.count < 6 { nPresent += Array(repeating: 0, count: 6 - nPresent.count) }
+        lastMinute = try c.decodeIfPresent([Int].self, forKey: .lastMinute) ?? Array(repeating: 0, count: 6)
+        if lastMinute.count < 6 { lastMinute += Array(repeating: 0, count: 6 - lastMinute.count) }
     }
 }
 
@@ -265,15 +273,25 @@ public enum WatchdogBand: Sendable {
         lastUnix <= 0 || nowUnix / minuteSeconds > lastUnix / minuteSeconds
     }
 
+    public static func channelReady(_ nPresent: [Int], _ k: Int) -> Bool {
+        k < nPresent.count && nPresent[k] >= firstMinutes
+    }
+
+    public static func channelReady(_ state: WatchdogBandState, _ k: Int) -> Bool {
+        channelReady(state.nPresent, k)
+    }
+
     public static func update(absResidual: [Double], eligible: Bool,
                               q: inout [Double], anchor: inout [Double],
                               n: inout Int, initialized: inout Bool) -> [Double] {
         var scale = Array(repeating: 1.0, count: 6)
         var nPresent = Array(repeating: 0, count: 6)
         var last = 0
+        var lastMinute = Array(repeating: 0, count: 6)
         return update(absResidual: absResidual, eligible: eligible, q: &q, anchor: &anchor,
                       n: &n, initialized: &initialized, scale: &scale,
-                      nowUnix: 0, lastUnix: &last, nPresent: &nPresent)
+                      nowUnix: 0, lastUnix: &last, nPresent: &nPresent,
+                      lastMinute: &lastMinute)
     }
 
     public static func update(absResidual: [Double], eligible: Bool,
@@ -282,9 +300,11 @@ public enum WatchdogBand: Sendable {
                               scale: inout [Double],
                               nowUnix: Int = 0, lastUnix: inout Int) -> [Double] {
         var nPresent = Array(repeating: 0, count: 6)
+        var lastMinute = Array(repeating: 0, count: 6)
         return update(absResidual: absResidual, eligible: eligible, q: &q, anchor: &anchor,
                       n: &n, initialized: &initialized, scale: &scale,
-                      nowUnix: nowUnix, lastUnix: &lastUnix, nPresent: &nPresent)
+                      nowUnix: nowUnix, lastUnix: &lastUnix, nPresent: &nPresent,
+                      lastMinute: &lastMinute)
     }
 
     public static func update(absResidual: [Double], eligible: Bool,
@@ -294,31 +314,60 @@ public enum WatchdogBand: Sendable {
                               nowUnix: Int = 0, lastUnix: inout Int,
                               present: [Bool]? = nil,
                               nPresent: inout [Int]) -> [Double] {
+        var lastMinute = Array(repeating: 0, count: 6)
+        return update(absResidual: absResidual, eligible: eligible, q: &q, anchor: &anchor,
+                      n: &n, initialized: &initialized, scale: &scale,
+                      nowUnix: nowUnix, lastUnix: &lastUnix, present: present,
+                      nPresent: &nPresent, lastMinute: &lastMinute)
+    }
+
+    public static func update(absResidual: [Double], eligible: Bool,
+                              q: inout [Double], anchor: inout [Double],
+                              n: inout Int, initialized: inout Bool,
+                              scale: inout [Double],
+                              nowUnix: Int = 0, lastUnix: inout Int,
+                              present: [Bool]? = nil,
+                              nPresent: inout [Int],
+                              lastMinute: inout [Int],
+                              sampleMinute: [Int]? = nil) -> [Double] {
         if q.count < 6 { q = Array(repeating: 0, count: 6) }
         if anchor.count < 6 { anchor = Array(repeating: 1, count: 6) }
         if scale.count < 6 { scale = Array(repeating: 1, count: 6) }
         if nPresent.count < 6 { nPresent = Array(repeating: 0, count: 6) }
+        if lastMinute.count < 6 { lastMinute += Array(repeating: 0, count: 6 - lastMinute.count) }
         guard eligible, absResidual.count >= 6 else { return scale }
         if absResidual.contains(where: { $0 >= residualCap }) { return scale }
         if nowUnix > 0, !shouldCountMinute(nowUnix: nowUnix, lastUnix: lastUnix) { return scale }
         let mask = present ?? Array(repeating: true, count: 6)
         guard mask.contains(true) else { return scale }
+        if nowUnix > 0, let samples = sampleMinute {
+            var anyNew = false
+            for k in 0..<6 where mask[k] && k < samples.count {
+                if samples[k] / minuteSeconds > lastMinute[k] { anyNew = true }
+            }
+            if !anyNew { return scale }
+        }
         n += 1
         if nowUnix > 0 { lastUnix = nowUnix }
-        let a = alpha(nElig: n)
         for k in 0..<6 {
             guard mask[k] else { continue }
+            if nowUnix > 0, let samples = sampleMinute, k < samples.count {
+                let civil = samples[k] / minuteSeconds
+                guard civil > lastMinute[k] else { continue }
+                lastMinute[k] = civil
+            }
             let x = min(max(absResidual[k], 0), learnCap)
             if nPresent[k] == 0 {
                 q[k] = x
             } else {
+                let a = alpha(nElig: nPresent[k] + 1)
                 q[k] = (1 - a) * q[k] + a * x
             }
             nPresent[k] += 1
         }
         var anyReady = initialized
         for k in 0..<6 {
-            if nPresent[k] >= firstMinutes {
+            if channelReady(nPresent, k) {
                 if anchor[k] <= qFloor + 1e-12, q[k] > 0 {
                     anchor[k] = max(q[k], qFloor)
                     scale[k] = 1
@@ -344,17 +393,21 @@ public enum WatchdogBand: Sendable {
                               scale: inout [Double]) -> [Double] {
         var last = 0
         var nPresent = Array(repeating: 0, count: 6)
+        var lastMinute = Array(repeating: 0, count: 6)
         return update(absResidual: absResidual, eligible: eligible, q: &q, anchor: &anchor,
                       n: &n, initialized: &initialized, scale: &scale,
-                      nowUnix: 0, lastUnix: &last, nPresent: &nPresent)
+                      nowUnix: 0, lastUnix: &last, nPresent: &nPresent,
+                      lastMinute: &lastMinute)
     }
 
     public static func update(_ state: inout WatchdogBandState, absResidual: [Double],
-                              eligible: Bool, nowUnix: Int, present: [Bool]? = nil) -> [Double] {
+                              eligible: Bool, nowUnix: Int, present: [Bool]? = nil,
+                              sampleMinute: [Int]? = nil) -> [Double] {
         update(absResidual: absResidual, eligible: eligible, q: &state.q, anchor: &state.anchor,
                n: &state.n, initialized: &state.ready, scale: &state.scale,
                nowUnix: nowUnix, lastUnix: &state.lastUnix, present: present,
-               nPresent: &state.nPresent)
+               nPresent: &state.nPresent, lastMinute: &state.lastMinute,
+               sampleMinute: sampleMinute)
     }
 
     public static func apply(_ scales: [Double], to values: [Double]) -> [Double] {

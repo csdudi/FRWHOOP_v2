@@ -600,9 +600,9 @@ final class WatchdogEpisodeTests: XCTestCase {
         XCTAssertEqual(WatchdogConfig.clampInterval(1), 1)
         XCTAssertEqual(WatchdogConfig.clampInterval(7), 5)
         XCTAssertEqual(WatchdogConfig.tickSeconds, 20)
-        XCTAssertEqual(WatchdogConfig.modelVersion, "units-ad-coreml-v2")
+        XCTAssertEqual(WatchdogConfig.modelVersion, "units-ad-coreml-v3")
         XCTAssertEqual(WatchdogConfig.configVersion, "watchdog-v2.5")
-        XCTAssertEqual(WatchdogForecastRuntime.modelVersion, "timesfm3-student-v2")
+        XCTAssertEqual(WatchdogForecastRuntime.modelVersion, "timesfm3-student-v3")
         XCTAssertEqual(WatchdogConfig.coreMLCheckpoint, "UniTS_AD.mlpackage")
         // Layer 1 shown: 50×0.80 + 35×0.90 + 15×1.00 = 86.5 → 87
         XCTAssertEqual(Watchdog.predictionTrust(energy: 2.4, usual: 58, coverage: 0.9,

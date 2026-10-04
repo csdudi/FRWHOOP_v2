@@ -235,6 +235,79 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
         XCTAssertTrue(ev.stale, ev.consoleReport)
     }
 
+    func testHabitMatchedStaleUsesLastMatchingNightNotOtherHabit() {
+        let t = LongitudinalBaseline.isoEpochDay(asOf)!
+        var rows: [LBDailyObservation] = []
+        var logs: [String: LBDayLog] = [:]
+        for e in (t - 60)...(t - 21) {
+            rows.append(ok(iso(e), 60, series: .sleepRHR))
+            logs[iso(e)] = LBDayLog(workout: .none)
+        }
+        for e in (t - 20)...(t - 1) {
+            rows.append(ok(iso(e), 66, series: .sleepRHR))
+            logs[iso(e)] = LBDayLog(workout: .hard)
+        }
+        logs[iso(t)] = LBDayLog(workout: .none)
+        let ev = eval(.sleepRHR, obs: rows, trial: LBTrialRequest(dayLogsByDay: logs))
+        XCTAssertTrue(ev.habitMatched, ev.consoleReport)
+        XCTAssertEqual(ev.habitClass, .rest)
+        XCTAssertEqual(ev.carry.lastQualityOKEpoch, t - 21)
+        XCTAssertTrue(ev.stale, ev.consoleReport)
+    }
+
+    func testWeekLastUpdateSkipsIllnessNight() {
+        let t = LongitudinalBaseline.isoEpochDay(asOf)!
+        var rows: [LBDailyObservation] = []
+        var logs: [String: LBDayLog] = [:]
+        for e in (t - 60)...(t - 1) {
+            rows.append(ok(iso(e), 60, series: .sleepRHR))
+        }
+        logs[iso(t - 1)] = {
+            var ill = LBDayLog()
+            ill.feltIll = true
+            return ill
+        }()
+        let ev = eval(.sleepRHR, obs: rows, trial: LBTrialRequest(dayLogsByDay: logs))
+        XCTAssertEqual(ev.copy7?.lastUpdate, iso(t - 2), ev.consoleReport)
+        XCTAssertNotEqual(ev.copy7?.lastUpdate, iso(t - 1))
+    }
+
+    func testFeltIllFreezesPreIllnessUsualWithoutResettingLong() {
+        let t = LongitudinalBaseline.isoEpochDay(asOf)!
+        var rows: [LBDailyObservation] = []
+        var logs: [String: LBDayLog] = [:]
+        for e in (t - 40)...(t - 1) {
+            rows.append(ok(iso(e), 60, series: .sleepRHR))
+        }
+        rows.append(ok(iso(t), 88, series: .sleepRHR))
+        logs[iso(t)] = {
+            var ill = LBDayLog()
+            ill.feltIll = true
+            return ill
+        }()
+        let ev = eval(.sleepRHR, obs: rows, trial: LBTrialRequest(dayLogsByDay: logs))
+        let freeze = try! XCTUnwrap(ev.usualFreeze, ev.consoleReport)
+        XCTAssertEqual(freeze.reason, LBUsualFreeze.loggedIll)
+        XCTAssertEqual(freeze.t0CivilDay, asOf)
+        XCTAssertEqual(freeze.centerLong, 60, accuracy: 1.5)
+        XCTAssertGreaterThanOrEqual(ev.nLong, 14, ev.consoleReport)
+        XCTAssertTrue(ev.establishedLong, ev.consoleReport)
+    }
+
+    func testWeekShiftDoesNotFreezeWithoutLoggedIll() {
+        let t = LongitudinalBaseline.isoEpochDay(asOf)!
+        var rows: [LBDailyObservation] = []
+        for e in (t - 40)...(t - 12) {
+            rows.append(ok(iso(e), 60, series: .sleepRHR))
+        }
+        for e in (t - 11)...t {
+            rows.append(ok(iso(e), 88, series: .sleepRHR))
+        }
+        let ev = eval(.sleepRHR, obs: rows)
+        XCTAssertNil(ev.usualFreeze, ev.consoleReport)
+        XCTAssertTrue(ev.establishedLong, ev.consoleReport)
+    }
+
     func testHowOffHiddenWhenTrustUnder35IsThePublishedRule() {
         XCTAssertEqual(LongitudinalBaseline.trustHideThreshold, 35)
         for s in LBSeries.allCases {

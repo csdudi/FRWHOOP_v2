@@ -51,7 +51,9 @@ public struct LBDayTape: Equatable, Sendable, Codable {
 
     public mutating func ingest(window: WatchdogWindow, nowUnix: Int,
                                 lastWorkoutEndUnix: Int = 0,
-                                sleepIntervals: [WatchdogSleepInterval] = []) -> Bool {
+                                sleepIntervals: [WatchdogSleepInterval] = [],
+                                trainUsual: Bool = true) -> Bool {
+        guard trainUsual else { return false }
         let tail = WatchdogLiveTail.resolve(window)
         let recovering = tail.postWorkout(carryEndUnix: lastWorkoutEndUnix, nowUnix: nowUnix)
         let features = window.resolvedActivityFeatures()

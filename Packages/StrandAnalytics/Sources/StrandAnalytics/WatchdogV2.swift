@@ -274,6 +274,7 @@ public enum WatchdogScores: Sendable {
         if recon >= WatchdogCalibration.tSevere && persist { return .severe }
         if recon >= WatchdogCalibration.tActive && persist { return .active }
         if recon >= WatchdogCalibration.tNote && persist { return .candidate }
+        if personalOff && persist { return .candidate }
         if recon >= WatchdogCalibration.tNote || personalOff { return .note }
         _ = forecast
         return .withinLimits
@@ -313,19 +314,25 @@ public enum WatchdogNotifyPolicy: Sendable {
                                 recon: Double = 0, previousRecon: Double = 0,
                                 eventLabel: WatchdogEventLabel = .abnormalMultiDirection,
                                 episodeId: String? = nil,
-                                notifiedSevereEpisodeId: String = "") -> (Bool, String) {
+                                notifiedSevereEpisodeId: String = "",
+                                lastNotifiedAt: Int? = nil,
+                                nowUnix: Int = 0) -> (Bool, String) {
         _ = fused
         _ = previousFused
         _ = openedEpisode
         let safetyEdge = safety && !previousSafety
         guard severity == .severe || safetyEdge else { return (false, "not-severe") }
+        let eid = episodeId ?? ""
+        let firstSevere = notifiedSevereEpisodeId.isEmpty
+            || (!eid.isEmpty && notifiedSevereEpisodeId != eid)
+        if firstSevere {
+            return (true, safetyEdge ? "safety" : "first-severe")
+        }
         if safetyEdge { return (true, "safety") }
         guard extremeFamily(eventLabel) else { return (false, "not-extreme-family") }
-        let eid = episodeId ?? ""
-        if !eid.isEmpty, notifiedSevereEpisodeId != eid {
-            return (true, "first-severe")
-        }
+        let cooled = lastNotifiedAt.map { nowUnix - $0 >= WatchdogConfig.notifyCooldownSeconds } ?? true
         if recon >= previousRecon + WatchdogCalibration.escalateDelta {
+            if !cooled { return (false, "cooldown") }
             return (true, "escalate")
         }
         return (false, "stable-episode")
@@ -365,6 +372,20 @@ public struct WatchdogForecastStep: Equatable, Sendable {
         return (1...h).map { nowUnix + $0 * WatchdogConfig.gridSeconds }
     }
 
+    /// Held cubes keep the emit timestamps. Do not recompute from the current wall second.
+    public static func persistHorizon(carry: WatchdogCarry, nowUnix: Int, holding: Bool) -> [Int] {
+        if holding {
+            if carry.lastForecastHorizonUnix.count == WatchdogCalibration.forecastHorizon {
+                return carry.lastForecastHorizonUnix
+            }
+            if carry.lastForecastUnix > 0 {
+                return horizonUnix(nowUnix: carry.lastForecastUnix)
+            }
+            return []
+        }
+        return horizonUnix(nowUnix: nowUnix)
+    }
+
     public var cube: [[Double]] {
         [nextHR, nextRHR, nextHRV, nextTemp, nextResp, nextSpO2]
     }
@@ -396,62 +417,37 @@ public struct WatchdogForecastRuntime: Sendable {
                      nowUnix: Int = 0,
                      tail: WatchdogLiveTail? = nil,
                      skipForecast: Bool = false) -> WatchdogForecastStep {
+        _ = tail
         let h = WatchdogCalibration.forecastHorizon
-        let from = (tail ?? WatchdogLiveTail.resolve(window)).startIndex
-        func lastObs(_ obs: [Double?], _ scale: [Double], from start: Int) -> (obs: [Double], sig: [Double]) {
-            var pairs: [(Double, Double)] = []
-            let lo = min(max(0, start), obs.count)
-            for i in lo..<obs.count {
-                if let o = obs[i] {
-                    let s = i < scale.count ? scale[i] : 1
-                    pairs.append((o, max(s, 0.01)))
-                }
-            }
-            let tail = pairs.suffix(h)
-            return (tail.map(\.0), tail.map(\.1))
-        }
-        func energy(obs: [Double], pred: [Double], sig: [Double]) -> Double {
-            guard !obs.isEmpty else { return 0 }
-            let n = min(obs.count, pred.count, sig.count)
-            guard n > 0 else { return 0 }
-            var z: [Double] = []
-            for i in 0..<n {
-                z.append(abs(obs[i] - pred[i]) / max(sig[i], 0.01))
-            }
-            return z.max() ?? 0
-        }
-        let hr = lastObs(window.hr, residual.scaleHR, from: from)
-        let rhr = lastObs(window.rhr, residual.scaleRHR, from: from)
-        let hrv = lastObs(window.hrv, residual.scaleHRV, from: from)
-        let temp = lastObs(window.temp, residual.scaleTemp, from: from)
-        let resp = lastObs(window.resp, residual.scaleResp, from: from)
-        let spo2 = lastObs(window.spo2, residual.scaleSpO2, from: from)
-
-        var e = 0.0
-        if carry.forecastStudentOk, carry.lastForecastHR.count == h {
-            e = max(e, energy(obs: hr.obs, pred: Array(carry.lastForecastHR.prefix(hr.obs.count)), sig: hr.sig))
-        }
-        if carry.forecastStudentOk, carry.lastForecastHRV.count == h {
-            e = max(e, energy(obs: hrv.obs, pred: Array(carry.lastForecastHRV.prefix(hrv.obs.count)), sig: hrv.sig))
-        }
-        if carry.forecastStudentOk, carry.lastForecastTemp.count == h {
-            e = max(e, energy(obs: temp.obs, pred: Array(carry.lastForecastTemp.prefix(temp.obs.count)), sig: temp.sig))
-        }
-        if carry.forecastStudentOk, carry.lastForecastResp.count == h {
-            e = max(e, energy(obs: resp.obs, pred: Array(carry.lastForecastResp.prefix(resp.obs.count)), sig: resp.sig))
-        }
-        if carry.forecastStudentOk, carry.lastForecastRHR.count == h {
-            e = max(e, energy(obs: rhr.obs, pred: Array(carry.lastForecastRHR.prefix(rhr.obs.count)), sig: rhr.sig))
-        }
-        if carry.forecastStudentOk, carry.lastForecastSpO2.count == h {
-            e = max(e, energy(obs: spo2.obs, pred: Array(carry.lastForecastSpO2.prefix(spo2.obs.count)), sig: spo2.sig))
-        }
-
         let skipStudent = skipForecast || (nowUnix > 0 && carry.forecastStudentOk
             && carry.lastForecastUnix > 0
             && (nowUnix - carry.lastForecastUnix) < 60
             && Self.completeCube(carry.lastForecastHR, carry.lastForecastRHR, carry.lastForecastHRV,
                                  carry.lastForecastTemp, carry.lastForecastResp, carry.lastForecastSpO2))
+        let emitHorizons = WatchdogForecastStep.persistHorizon(carry: carry, nowUnix: nowUnix, holding: skipStudent)
+        let backcastHorizons = WatchdogForecastStep.persistHorizon(carry: carry, nowUnix: nowUnix, holding: true)
+        var e = 0.0
+        if carry.forecastStudentOk {
+            e = max(e, Self.backcastEnergy(obs: window.hr, pred: carry.lastForecastHR,
+                                           scale: residual.scaleHR, startUnix: window.startUnix,
+                                           horizons: backcastHorizons))
+            e = max(e, Self.backcastEnergy(obs: window.hrv, pred: carry.lastForecastHRV,
+                                           scale: residual.scaleHRV, startUnix: window.startUnix,
+                                           horizons: backcastHorizons))
+            e = max(e, Self.backcastEnergy(obs: window.temp, pred: carry.lastForecastTemp,
+                                           scale: residual.scaleTemp, startUnix: window.startUnix,
+                                           horizons: backcastHorizons))
+            e = max(e, Self.backcastEnergy(obs: window.resp, pred: carry.lastForecastResp,
+                                           scale: residual.scaleResp, startUnix: window.startUnix,
+                                           horizons: backcastHorizons))
+            e = max(e, Self.backcastEnergy(obs: window.rhr, pred: carry.lastForecastRHR,
+                                           scale: residual.scaleRHR, startUnix: window.startUnix,
+                                           horizons: backcastHorizons))
+            e = max(e, Self.backcastEnergy(obs: window.spo2, pred: carry.lastForecastSpO2,
+                                           scale: residual.scaleSpO2, startUnix: window.startUnix,
+                                           horizons: backcastHorizons))
+        }
+
         if skipStudent {
             let src = skipForecast
                 ? (carry.lastForecastSource.isEmpty ? "hold" : carry.lastForecastSource)
@@ -464,7 +460,7 @@ public struct WatchdogForecastRuntime: Sendable {
                                                                  carry.lastForecastHRV, carry.lastForecastTemp,
                                                                  carry.lastForecastResp, carry.lastForecastSpO2),
                                         source: src,
-                                        horizonUnix: WatchdogForecastStep.horizonUnix(nowUnix: nowUnix))
+                                        horizonUnix: emitHorizons)
         }
 
         func hold(_ hat: [Double?]) -> [Double] {
@@ -492,6 +488,7 @@ public struct WatchdogForecastRuntime: Sendable {
             fillHat(residual.reconstructedSpO2, bases[5])
         ]
         let occ = UniTSRuntime.occupancy(window)
+        let present = UniTSRuntime.packPresentMask(window)
         let promptVec = [
             bases[0] ?? WatchdogPopulationPriors.hr,
             bases[1] ?? WatchdogPopulationPriors.rhr,
@@ -506,7 +503,8 @@ public struct WatchdogForecastRuntime: Sendable {
             predicted = override
             predictedSource = "inject"
         } else {
-            predicted = TimesFMStudentSession.shared.predict(history: history, prompt: promptVec, occupancy: occ)
+            predicted = TimesFMStudentSession.shared.predict(
+                history: history, prompt: promptVec, occupancy: occ, presentMask: present)
             predictedSource = "student"
         }
         if let forecast = predicted,
@@ -525,6 +523,34 @@ public struct WatchdogForecastRuntime: Sendable {
                                     nextSpO2: hold(residual.reconstructedSpO2),
                                     ranStudent: false, studentOk: false, source: "hold",
                                     horizonUnix: WatchdogForecastStep.horizonUnix(nowUnix: nowUnix))
+    }
+
+    /// Score cube column `i` against the observation at `horizons[i]`, not the last present minutes.
+    public static func backcastEnergy(obs: [Double?], pred: [Double], scale: [Double],
+                                      startUnix: Int, horizons: [Int]) -> Double {
+        let n = min(pred.count, horizons.count)
+        guard n > 0 else { return 0 }
+        var z: [Double] = []
+        for i in 0..<n {
+            guard let o = observationAt(unix: horizons[i], series: obs, startUnix: startUnix) else { continue }
+            let slot = slotIndex(unix: horizons[i], startUnix: startUnix)
+            let s = (slot != nil && slot! < scale.count) ? max(scale[slot!], 0.01) : 0.01
+            z.append(abs(o - pred[i]) / s)
+        }
+        return z.max() ?? 0
+    }
+
+    public static func observationAt(unix: Int, series: [Double?], startUnix: Int) -> Double? {
+        guard let i = slotIndex(unix: unix, startUnix: startUnix), i < series.count else { return nil }
+        return series[i]
+    }
+
+    public static func slotIndex(unix: Int, startUnix: Int) -> Int? {
+        let g = WatchdogConfig.gridSeconds
+        guard g > 0 else { return nil }
+        let delta = unix - startUnix
+        guard delta >= 0, delta % g == 0 else { return nil }
+        return delta / g
     }
 
     public static func completeCube(_ planes: [[Double]]) -> Bool {

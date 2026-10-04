@@ -16,7 +16,8 @@ final class TimesFMStudentSession: @unchecked Sendable {
         return model != nil
     }
 
-    func predict(history: [[Double]], prompt: [Double], occupancy: [Double]) -> [[Double]]? {
+    func predict(history: [[Double]], prompt: [Double], occupancy: [Double],
+                 presentMask: [[Double]] = []) -> [[Double]]? {
         lock.lock()
         defer { lock.unlock() }
         guard let model = loadIfNeeded() else { return nil }
@@ -29,11 +30,13 @@ final class TimesFMStudentSession: @unchecked Sendable {
             }
             occ = Array(occ.prefix(WatchdogConfig.seqLen))
             let occArr = try UniTSCoreMLSession.vector(occ, shape: [1, NSNumber(value: WatchdogConfig.seqLen)])
-            let input = try MLDictionaryFeatureProvider(dictionary: [
+            var dict: [String: MLFeatureValue] = [
                 "history": MLFeatureValue(multiArray: hist),
                 "prompt": MLFeatureValue(multiArray: pr),
                 "occupancy": MLFeatureValue(multiArray: occArr)
-            ])
+            ]
+            UniTSCoreMLSession.attachPresentMask(dict: &dict, model: model, presentMask: presentMask)
+            let input = try MLDictionaryFeatureProvider(dictionary: dict)
             let out = try model.prediction(from: input)
             guard let arr = out.featureValue(for: "forecast")?.multiArrayValue else { return nil }
             return Self.forecastPlanes(arr)

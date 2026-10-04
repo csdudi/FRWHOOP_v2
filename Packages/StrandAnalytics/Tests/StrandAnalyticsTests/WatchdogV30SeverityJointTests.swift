@@ -181,8 +181,10 @@ final class WatchdogV30SeverityJointTests: XCTestCase {
         XCTAssertFalse(WatchdogSafety.fired(w), "must be the model door, not HR>120 / temp / resp caps")
         let first = Watchdog.evaluate(window: .success(w), prompt: prompt, nowUnix: now)
         XCTAssertGreaterThanOrEqual(first.jointEnergy, WatchdogCalibration.tActive, first.episodeLine)
-        XCTAssertNotEqual(first.severity, .severe, "persist needs two ticks")
-        let second = Watchdog.evaluate(window: .success(w), prompt: prompt, nowUnix: now + 60,
+        XCTAssertNotEqual(first.severity, .severe, "persist needs two valid minutes")
+        let laterFeed = Watchdog.syntheticFeed(now: now + 60, hr: 96, hrv: 48, temp: 34.3, resp: 22, motion: 0)
+        let laterWin = WatchdogWindowBuilder.build(laterFeed)
+        let second = Watchdog.evaluate(window: laterWin, prompt: prompt, nowUnix: now + 60,
                                        previous: first.carry)
         XCTAssertTrue(second.severity == .severe || second.severity == .active, second.episodeLine)
         XCTAssertGreaterThanOrEqual(second.jointEnergy, WatchdogCalibration.tActive)

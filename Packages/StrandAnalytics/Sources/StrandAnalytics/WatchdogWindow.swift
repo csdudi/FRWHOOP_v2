@@ -139,7 +139,7 @@ public struct WatchdogWindow: Equatable, Sendable {
     }
 
     /// Drop a whole series when its last finite minute is older than that channel's clock.
-    /// Official UniTS / TimesFM never see a stale last pair as current.
+    /// Student UniTS / TimesFM never see a stale last pair as current.
     public mutating func maskStaleChannels() {
         func wipe(_ series: inout [Double?], channel: Int) {
             if !WatchdogQuality.channelFresh(series, startUnix: startUnix, nowUnix: nowUnix,
@@ -460,22 +460,26 @@ public enum WatchdogWindowBuilder {
         var out = Array(repeating: Optional<Double>.none, count: WatchdogConfig.seqLen)
         let span = max(end - start, 1)
         for point in points where point.ts >= start && point.ts < end {
-            guard point.rmssd >= WatchdogConfig.rmssdLow,
-                  point.rmssd <= WatchdogConfig.rmssdHigh else { continue }
+            guard point.rmssd > 0 else { continue }
             let idx = min(WatchdogConfig.seqLen - 1, ((point.ts - start) * WatchdogConfig.seqLen) / span)
             out[idx] = point.rmssd
         }
         return median3(out)
     }
 
-    /// One-minute RMSSD spikes from a thin R–R tail; 3-tap median keeps the 5-minute shape.
+    /// Smooth one-minute RMSSD jitter. Keep a sample the high/low rule is supposed to see.
     static func median3(_ xs: [Double?]) -> [Double?] {
         guard xs.count >= 2 else { return xs }
         return xs.indices.map { i in
+            if let v = xs[i], isHRVSafetyExtreme(v) { return v }
             let vals = [xs[max(0, i - 1)], xs[i], xs[min(xs.count - 1, i + 1)]].compactMap { $0 }
             guard !vals.isEmpty else { return nil }
             return vals.sorted()[vals.count / 2]
         }
+    }
+
+    static func isHRVSafetyExtreme(_ rmssd: Double) -> Bool {
+        rmssd > 0 && (rmssd < WatchdogConfig.rmssdLow || rmssd > WatchdogConfig.rmssdHigh)
     }
 
     static func coverageFraction(hr: [Double?], family: DeviceFamily, hrTimes: [Int],

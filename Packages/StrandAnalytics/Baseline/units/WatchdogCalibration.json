@@ -30,7 +30,7 @@
   "forecast": {
     "teacher": "https://github.com/google-research/timesfm",
     "checkpoint": "google/timesfm-3.0-pytorch",
-        "student": "timesfm3-student-v2",
+        "student": "timesfm3-student-v3",
     "horizon_minutes": 5
   }
 }
