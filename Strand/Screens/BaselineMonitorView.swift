@@ -58,15 +58,15 @@ struct BaselineMonitorView: View {
                 Text("Long-term baseline")
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
+                seriesHeader
+                SegmentedPillControl(BaselineStore.ContextFilter.allCases,
+                                     selection: Binding(
+                                        get: { store.context },
+                                        set: { store.selectContext($0, days: days) }
+                                     ),
+                                     adaptsToAvailableWidth: true) { $0.rawValue }
+                metricChips
                 if usualsReady {
-                    seriesHeader
-                    SegmentedPillControl(BaselineStore.ContextFilter.allCases,
-                                         selection: Binding(
-                                            get: { store.context },
-                                            set: { store.selectContext($0, days: days) }
-                                         ),
-                                         adaptsToAvailableWidth: true) { $0.rawValue }
-                    metricChips
                     BaselineCopyPlot(
                         heading: "Short-term usual · this week",
                         methodNote: "Day by day. Green band is this week’s usual. Last night is on the right; it is not folded into the usual.",
@@ -137,7 +137,9 @@ struct BaselineMonitorView: View {
                 Text("Not enough days yet")
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
-                Text("There aren’t enough days to calculate the baseline yet.")
+                Text(store.nightsNeeded(for: store.series) > 0
+                     ? "\(store.shortTitle(for: store.series)) needs \(store.nightsNeeded(for: store.series)) more night\(store.nightsNeeded(for: store.series) == 1 ? "" : "s") for a week usual. Other vitals that are ready stay on the chips."
+                     : "There aren’t enough days to calculate this vital yet. Other vitals that are ready stay on the chips.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -407,6 +409,7 @@ struct BaselineMonitorView: View {
                         }
                         .font(StrandFont.captionNumber)
                         .foregroundStyle(on ? StrandPalette.textPrimary : StrandPalette.textSecondary)
+                        .opacity(store.seriesReadiness[s]?.ready == true ? 1 : 0.55)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
                         .background(on ? StrandPalette.accent.opacity(0.12) : StrandPalette.surfaceInset,

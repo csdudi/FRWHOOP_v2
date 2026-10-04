@@ -390,6 +390,18 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         sessionLastUnix = 0
     }
 
+    public func presentMinutes(channel: Int) -> Int {
+        guard channel >= 0 else { return 0 }
+        if let state = bandByKey[lastBandKey], channel < state.nPresent.count {
+            return state.nPresent[channel]
+        }
+        return bandByKey.values.map { channel < $0.nPresent.count ? $0.nPresent[channel] : 0 }.max() ?? 0
+    }
+
+    public func channelBandReady(_ channel: Int) -> Bool {
+        presentMinutes(channel: channel) >= WatchdogBand.firstMinutes
+    }
+
     mutating func migrateLegacyBandIfNeeded(into key: WatchdogPhaseKey) {
         guard bandByKey.isEmpty, bandN > 0 else { return }
         bandByKey[key.id] = WatchdogBandState(q: bandQ, anchor: bandAnchor, n: bandN,

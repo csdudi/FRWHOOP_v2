@@ -95,7 +95,7 @@ struct WatchdogEpisodeNoteSheet: View {
     }
 
     private func chipRow<T: Equatable>(_ values: [T], selection: Binding<T?>,
-                                       label: (T) -> String) -> some View {
+                                       label: @escaping (T) -> String) -> some View {
         HStack(spacing: 8) {
             ForEach(Array(values.enumerated()), id: \.offset) { _, value in
                 let on = selection.wrappedValue == value

@@ -44,6 +44,10 @@ struct WatchdogPlaceholderView: View {
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                Text(snapshot.bandCaption)
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let recovery = store.eventRecovery, recovery.status != .noReference {
                     Text(recovery.headline)
                         .font(StrandFont.caption)
@@ -285,30 +289,34 @@ private struct WatchdogTraitStrip: View {
 
     private func chart(flash: Bool) -> some View {
         Chart {
-            ForEach(expected, id: \.id) { point in
-                AreaMark(
-                    x: .value("t", point.id),
-                    yStart: .value("v", point.y - half(at: Int(point.id.rounded()))),
-                    yEnd: .value("v", point.y + half(at: Int(point.id.rounded())))
-                )
-                .foregroundStyle(corridor.opacity(rangeReady ? 0.26 : 0.14))
-                .interpolationMethod(.linear)
+            if rangeReady {
+                ForEach(expected, id: \.id) { point in
+                    AreaMark(
+                        x: .value("t", point.id),
+                        yStart: .value("v", point.y - half(at: Int(point.id.rounded()))),
+                        yEnd: .value("v", point.y + half(at: Int(point.id.rounded())))
+                    )
+                    .foregroundStyle(corridor.opacity(0.26))
+                    .interpolationMethod(.linear)
+                }
+                ForEach(expected, id: \.id) { point in
+                    LineMark(x: .value("t", point.id), y: .value("lo", point.y - half(at: Int(point.id.rounded()))),
+                             series: .value("s", "lo"))
+                        .interpolationMethod(.linear)
+                        .foregroundStyle(corridor.opacity(0.55))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    LineMark(x: .value("t", point.id), y: .value("hi", point.y + half(at: Int(point.id.rounded()))),
+                             series: .value("s", "hi"))
+                        .interpolationMethod(.linear)
+                        .foregroundStyle(corridor.opacity(0.55))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                }
             }
             ForEach(expected, id: \.id) { point in
-                LineMark(x: .value("t", point.id), y: .value("lo", point.y - half(at: Int(point.id.rounded()))),
-                         series: .value("s", "lo"))
-                    .interpolationMethod(.linear)
-                    .foregroundStyle(corridor.opacity(0.55))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                LineMark(x: .value("t", point.id), y: .value("hi", point.y + half(at: Int(point.id.rounded()))),
-                         series: .value("s", "hi"))
-                    .interpolationMethod(.linear)
-                    .foregroundStyle(corridor.opacity(0.55))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 LineMark(x: .value("t", point.id), y: .value("v", point.y), series: .value("s", "usual"))
                     .interpolationMethod(.linear)
-                    .foregroundStyle(corridor)
-                    .lineStyle(StrokeStyle(lineWidth: 2.2, dash: [5, 4]))
+                    .foregroundStyle(corridor.opacity(rangeReady ? 1 : 0.45))
+                    .lineStyle(StrokeStyle(lineWidth: rangeReady ? 2.2 : 1.4, dash: [5, 4]))
             }
             ForEach(observed, id: \.id) { point in
                 LineMark(x: .value("t", point.id), y: .value("v", point.y), series: .value("s", "now"))
@@ -384,6 +392,7 @@ private struct WatchdogLiveSnapshot {
     let liveLabel: String
     let updatedAgo: String?
     let certaintyCaption: String?
+    let bandCaption: String
     let metrics: [MetricRow]
 
     init(store: BaselineStore, temperatureUnit: TemperatureUnit = .celsius) {
@@ -393,6 +402,7 @@ private struct WatchdogLiveSnapshot {
             liveLabel = isLive ? "Live baseline" : Self.waitingLabel(result)
             updatedAgo = Self.ago(result.lastTickUnix)
             certaintyCaption = Self.certaintyCaption(result)
+            bandCaption = Self.bandCaption(result)
             let hr = result.signals.first(where: { $0.name == "HR" })
             let rhr = result.signals.first(where: { $0.name == "RHR" })
             let hrv = result.signals.first(where: { $0.name == "HRV" })
@@ -405,32 +415,38 @@ private struct WatchdogLiveSnapshot {
                          reconstructed: result.reconstructedHR, rangeSeries: result.rangeHR,
                          caption: "Last 30 min", minSpan: 8, whoop5: whoop5,
                          trustPct: hr?.trustPct ?? 0, liveOff: result.liveOff,
-                         channelHot: result.contributing.contains("HR") || result.personalOff),
+                         channelHot: result.contributing.contains("HR") || result.personalOff,
+                         bandReady: result.carry.channelBandReady(0)),
                 Self.row(id: "rhr", name: "Resting HR", signal: rhr, series: result.horizonRHR,
                          reconstructed: result.reconstructedRHR, rangeSeries: result.rangeRHR,
                          caption: "Still minutes only", minSpan: 8, whoop5: whoop5,
                          trustPct: rhr?.trustPct ?? 0, liveOff: result.liveOff,
-                         channelHot: result.contributing.contains("RHR") || result.personalOff),
+                         channelHot: result.contributing.contains("RHR") || result.personalOff,
+                         bandReady: result.carry.channelBandReady(1)),
                 Self.row(id: "hrv", name: "HRV", signal: hrv, series: result.horizonHRV,
                          reconstructed: result.reconstructedHRV, rangeSeries: result.rangeHRV,
                          caption: "5 min RMSSD", minSpan: 18, whoop5: whoop5,
                          trustPct: hrv?.trustPct ?? 0, liveOff: result.liveOff,
-                         channelHot: result.contributing.contains("HRV") || result.personalOff),
+                         channelHot: result.contributing.contains("HRV") || result.personalOff,
+                         bandReady: result.carry.channelBandReady(2)),
                 Self.row(id: "temp", name: "Temp", signal: temp, series: result.horizonTemp,
                          reconstructed: result.reconstructedTemp, rangeSeries: result.rangeTemp,
                          caption: "Last 30 min", minSpan: 0.4, whoop5: whoop5,
                          fahrenheit: fahrenheit, trustPct: temp?.trustPct ?? 0, liveOff: result.liveOff,
-                         channelHot: result.contributing.contains("Temp")),
+                         channelHot: result.contributing.contains("Temp"),
+                         bandReady: result.carry.channelBandReady(3)),
                 Self.row(id: "resp", name: "Breathing", signal: resp, series: result.horizonResp,
                          reconstructed: result.reconstructedResp, rangeSeries: result.rangeResp,
                          caption: "Last 30 min", minSpan: 4, whoop5: whoop5,
                          trustPct: resp?.trustPct ?? 0, liveOff: result.liveOff,
-                         channelHot: result.contributing.contains("Resp")),
+                         channelHot: result.contributing.contains("Resp"),
+                         bandReady: result.carry.channelBandReady(4)),
                 Self.row(id: "spo2", name: "SpO₂", signal: spo2, series: result.horizonSpO2,
                          reconstructed: result.reconstructedSpO2, rangeSeries: result.rangeSpO2,
                          caption: "When present", minSpan: 2, whoop5: whoop5,
                          trustPct: spo2?.trustPct ?? 0, liveOff: result.liveOff,
-                         channelHot: result.contributing.contains("SpO2"))
+                         channelHot: result.contributing.contains("SpO2"),
+                         bandReady: result.carry.channelBandReady(5))
             ]
             return
         }
@@ -439,6 +455,7 @@ private struct WatchdogLiveSnapshot {
         liveLabel = "Waiting"
         updatedAgo = nil
         certaintyCaption = "Waiting on this half-hour."
+        bandCaption = Self.bandCaption(nil)
         let whoop5 = WhoopModel.persisted == .whoop5mg
         metrics = [
             Self.emptyRow(id: "hr", name: "Heart rate", caption: "Last 30 min", minSpan: 8, whoop5: whoop5),
@@ -454,7 +471,8 @@ private struct WatchdogLiveSnapshot {
     static func row(id: String, name: String, signal: WatchdogSignalEvidence?,
                     series: [Double], reconstructed: [Double], rangeSeries: [Double],
                     caption: String, minSpan: Double, whoop5: Bool, fahrenheit: Bool = false,
-                    trustPct: Int, liveOff: Bool = false, channelHot: Bool = false) -> MetricRow {
+                    trustPct: Int, liveOff: Bool = false, channelHot: Bool = false,
+                    bandReady: Bool = false) -> MetricRow {
         var now = signal?.observed
         var usual = signal?.reconstructed ?? signal?.usual
         var series = series
@@ -474,7 +492,7 @@ private struct WatchdogLiveSnapshot {
             unit = "°F"
         }
         let hasLive = series.contains(where: \.isFinite)
-        let callReady = trustPct >= LongitudinalBaseline.trustHideThreshold
+        let callReady = bandReady && trustPct >= LongitudinalBaseline.trustHideThreshold
         let bandGain = Self.learningBandGain(trustPct)
         reconstructed = Self.maskToRecorded(reconstructed, recorded: series)
         rangeSeries = Self.maskToRecorded(rangeSeries, recorded: series).map { $0.isFinite ? $0 * bandGain : $0 }
@@ -512,7 +530,7 @@ private struct WatchdogLiveSnapshot {
             status = "—"
             tone = StrandPalette.textTertiary
         } else if !callReady {
-            status = "Learning"
+            status = hasLive ? "Live" : "Learning"
             tone = StrandPalette.textSecondary
         } else if liveOff && (outsideBand || channelHot) {
             let mag: Double
@@ -542,7 +560,7 @@ private struct WatchdogLiveSnapshot {
                          decimals: decimals(for: id),
                          rangeHalf: lastWidth,
                          rangeSeries: rangeSeries,
-                         rangeLabel: rangeLabel, rangeReady: callReady, trustPct: trustPct,
+                         rangeLabel: callReady ? rangeLabel : nil, rangeReady: callReady, trustPct: trustPct,
                          pulsePeriod: whoopReadSeconds(id: id, whoop5: whoop5))
     }
 
@@ -627,6 +645,18 @@ private struct WatchdogLiveSnapshot {
     }
 
     static func decimals(for id: String) -> Int { id == "temp" ? 1 : 0 }
+
+    static func bandCaption(_ result: WatchdogResult?) -> String {
+        guard let result, result.unavailable == nil else {
+            return "Live line can fill as soon as this half-hour has readings. The green band waits for 14 good minutes of that vital."
+        }
+        let n = result.carry.presentMinutes(channel: 0)
+        let need = max(0, WatchdogBand.firstMinutes - n)
+        if need == 0 {
+            return "Heart-rate green band is on. Sparse vitals (temp, breathing, SpO₂) each need their own 14 good minutes."
+        }
+        return "Live reading now. Green band after 14 good minutes of that vital — about \(need) more for heart rate. Temp is slower because samples are sparse."
+    }
 
     static func certaintyCaption(_ result: WatchdogResult) -> String? {
         switch result.carry.notifyDelivery {

@@ -77,7 +77,17 @@ final class BaselineStore: ObservableObject {
     @Published var editingEventIndex: Int?
     @Published var trialExpanded = false
     @Published var watchCandidates: [BaselineWatchCandidate] = []
+    /// Per-chip readiness in the current context. One thin series must not hide the others.
+    @Published var seriesReadiness: [LBSeries: SeriesReadiness] = [:]
     private var dismissedPromptDay: String?
+
+    struct SeriesReadiness: Equatable {
+        var show7: Bool
+        var showLong: Bool
+        var n7: Int
+        var nLong: Int
+        var ready: Bool { show7 || showLong }
+    }
 
     private let defaults: UserDefaults
     private let eventsKey = "noop.baseline.events.v1"
@@ -361,10 +371,16 @@ final class BaselineStore: ObservableObject {
         }
     }
 
-    func rescore(days: [DailyMetric]) {
+    func rescore(days: [DailyMetric], preferReadySeries: Bool = true) {
         clampAsOf(days: days)
         if !displayedSeries.contains(series) {
             series = displayedSeries.first ?? .sleepRHR
+        }
+        refreshSeriesReadiness(days: days)
+        if preferReadySeries,
+           seriesReadiness[series]?.ready != true,
+           let ready = displayedSeries.first(where: { seriesReadiness[$0]?.ready == true }) {
+            series = ready
         }
         let obs = observations(from: days, series: series)
         let freeze = loadFreeze(series: series)
@@ -485,6 +501,23 @@ final class BaselineStore: ObservableObject {
             coverage: 1, lastUpdate: nil, version: "freeze", held: true)
     }
 
+    func refreshSeriesReadiness(days: [DailyMetric]) {
+        var next: [LBSeries: SeriesReadiness] = [:]
+        for s in displayedSeries {
+            let ev = LongitudinalBaseline.evaluate(
+                asOf: asOf, series: s, observations: observations(from: days, series: s),
+                trial: LBTrialRequest.none)
+            next[s] = SeriesReadiness(show7: ev.show7, showLong: ev.showLong, n7: ev.n7, nLong: ev.nLong)
+        }
+        seriesReadiness = next
+    }
+
+    func nightsNeeded(for s: LBSeries) -> Int {
+        let r = seriesReadiness[s]
+        let n7 = r?.n7 ?? 0
+        return max(0, LongitudinalBaseline.Params.n7Show - n7)
+    }
+
     func selectContext(_ next: ContextFilter, days: [DailyMetric]) {
         context = next
         if !displayedSeries.contains(series) {
@@ -497,7 +530,7 @@ final class BaselineStore: ObservableObject {
     func selectSeries(_ next: LBSeries, days: [DailyMetric]) {
         series = next
         jumpToNewestNight(days: days)
-        rescore(days: days)
+        rescore(days: days, preferReadySeries: false)
     }
 
     /// Metric / context switches always land on the newest scored night so the plots are current.
