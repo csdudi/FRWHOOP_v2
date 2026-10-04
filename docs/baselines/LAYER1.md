@@ -21,6 +21,8 @@ HRV week span 10 trims T−10…T−8 from the long copy (`n_long` 50 instead of
 
 A skip-and-hold of the **center** (thin or missing night) does not present that held center as “tonight’s usual.” The card stays quiet or shows that the copy did not update.
 
+**Last OK** is the last **clean, habit-matched** night of that copy. An illness night with a number does not stamp freshness. After rest-vs-trained remap, a rest usual is stale from the last rest night — not from yesterday’s trained night. Week `lastUpdate` also requires `nightIsClean`.
+
 ## Series stay in their own context
 
 Sleep RHR is never mixed with awake-rest HR or with steps. Catalog is **18** series. Sleep + steps still come from `DailyMetric`. IMU energy and the daytime / nadir / active-minute stubs come from **measured unique minutes** (`LBDayTape`, same rest / effort / sleep / freshness / 20 min recovery gates as live Watchdog). No rest+6 / ×0.88 twins. A series with no minutes that day stays empty.
@@ -68,7 +70,9 @@ The card never names a drug as the cause of a change.
 
 Watchdog **reads** a *shown* Layer 1 copy as an optional prompt (awake HR vs sleep RHR stay on separate copies; two copies are never averaged). A shown usual can raise live TRUST and supply a MAD floor for reconstruction σ. It does **not** gate the half-hour call: nights are not required before Watchdog can leave learning.
 
-Watchdog **never writes** Layer 1 7-day / 60-day snapshots. After a live tick it may append unique-minute **observations** to `LBDayTape`. The live predicted range is UniTS / prior \(\hat{x} \pm \sigma\), not Layer 1 \(k \times\) MAD. See [WATCHDOG.md](WATCHDOG.md).
+Watchdog **never writes** Layer 1 7-day / 60-day snapshots. After a live tick it may append unique-minute **observations** to `LBDayTape` only when Watchdog `shouldTrainUsual` is true (not unavailable, not confounded, not an open Off episode). The live predicted range is UniTS / prior \(\hat{x} \pm \sigma\), not Layer 1 \(k \times\) MAD. See [WATCHDOG.md](WATCHDOG.md).
+
+Watchdog personal-off **reads** a logged felt-ill snapshot (`LBUsualFreeze`) or the shown 60-day copy. That is a ruler for the live card. It does not average the two Layer 1 usuals and does not start a treatment epoch.
 
 | Piece | Path |
 |---|---|

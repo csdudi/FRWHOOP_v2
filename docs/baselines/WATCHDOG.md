@@ -15,6 +15,23 @@ That is a **short-term** engine. It is not the 7-day / 60-day Layer 1 usual. Cha
 
 Layer 1 is optional **input**. A shown usual (and a mature still sidecar) may tighten the prompt. They do not become the green corridor.
 
+## Must stay true
+
+These are the live-engine rules from leftover close-out 1–10. Charge is not rewritten.
+
+| # | Rule |
+|---|---|
+| 1 | Day-tape HRV is **native RMSSD ms**. Layer 1 `toMath` is the only ln. Leftover ln buckets migrate once (`daytape.v2`). |
+| 2 | Counts use the **measurement civil minute** of that channel. Re-reading a window, or holding one sparse temp while the wall clock moves, does not raise tape / band / sidecar `n`. |
+| 3 | Sleep minutes never train `awakeRest*`. Band, sidecar, tape, and IMU learn only when `shouldTrainUsual` is true (quality ok, not confounded, not candidate/active/severe). Yesterday’s confounder applies only while last night’s sleep is still open. Detection still runs. |
+| 4 | Each vital has its own seed, `nPresent`, ready (≥ 14 **that** channel), and first-day sidecar. Missing temp is not 0 and does not inherit HR ready. |
+| 5 | Layer 1 last-OK / last-update use **clean, habit-matched** nights. Illness does not refresh freshness. |
+| 6 | Personal-off is last fresh **native** HR / HRV vs the **logged felt-ill snapshot or 60-day** usual — never the walking 7-day, never the UniTS hat. Sustained personal-off is **candidate** even if the hat is quiet. Adaptation holds while Off or an episode is open. |
+| 7 | Safety is last still-rest **extrema** (HR max/min, not the minute mean). An out-of-band RMSSD is kept; a 3-tap median must not erase it. Duration is held across thin / UniTS-fail ticks. Wrist-off stays unavailable. |
+| 8 | First severe of an episode pages once. Persist and recovery advance on a **new valid observation minute**, not 20 s ticks or a held pair in a new wall minute. Missing data pauses recovery and does not resolve. Escalate needs a larger jump **and** 30 quiet minutes. |
+| 9 | Live **Off** = `severity ≥ candidate` or safety or personal-off. It is not Layer 1 HOW OFF and not “last point outside the painted band.” Sparse C is fresh minutes / 30, never 1.0 from one pair. Thresholds stay `prior-untuned`. |
+| 10 | Bundled graphs are **students** (`units-ad-coreml-v3` / `timesfm3-student-v3`). Not labelled official. Official UniTS / TimesFM 2.5 convert is deferred; TimesFM 3.0 must not ship. Wearer Early is shadow. `present_mask` (1 = measured) is required. A held forecast cube keeps emit clocks `now+60…now+300`; backcast scores those minutes. |
+
 ## Loop (on the phone)
 
 `WatchdogService.tick` (foreground ~20 s, or a background refresh) → **active strap only** → 30×60 s window → `Watchdog.evaluate`:
@@ -29,7 +46,7 @@ Layer 1 is optional **input**. A shown usual (and a mature still sidecar) may ti
 8. **Confounders** — felt-ill / extra med **today** (calendar day, not Layer 1 `asOf`) stops still-band and rest-tape learning. Models still draw. Open sleep may still use yesterday’s log. Live UniTS prompt `asOf` is **calendar yesterday** (newest scored night ≤ today), not the Baseline calendar swipe.
 9. **Green band** — small σ updates on the current phase×activity key after 14 **present** minutes of that channel (still/sleep, or a held workout family). A walk key does not write the still key. Post-workout is not learnable. The same **civil minute** does not increment `n`. Band and sidecar **do not learn** while severity is candidate/active/severe or Layer 1 **personal-off**. Personal-off is last fresh HR / HRV vs the **logged felt-ill / treatment freeze or 60-day** matching usual — not the walking 7-day, not the UniTS hat. A quiet hat with a sustained personal-off is still **candidate**.
 10. **Safety** — still-wrist extrema can page only if that channel is **fresh**, including when coverage is incomplete. Historical backfill and `liveAlerts: false` cannot `shouldNotify`.
-11. **Day tape** — after the tick, unique gated minutes go to Layer 1 `LBDayTape`. Sleep minutes (col-19 or open interval) never write `awakeRest*`. That is observations, not snapshot write.
+11. **Day tape** — after the tick, unique gated minutes go to Layer 1 `LBDayTape` only when `shouldTrainUsual` is true. Sleep minutes (col-19 or open interval) never write `awakeRest*`. That is observations, not snapshot write. `trainUsual: false` is a no-op.
 12. **Carry / notify** — UserDefaults carry is namespaced by **active `deviceId`**; switching straps clears live rings. First severe of an episode pages once. Mismatch persist is per **civil minute**. Delivery is queued / sent / failed. BG expiration **cancels** the in-flight tick.
 
 ## How each vital’s short-term baseline is calculated
