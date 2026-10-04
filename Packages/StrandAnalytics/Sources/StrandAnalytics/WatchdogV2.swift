@@ -308,6 +308,12 @@ public enum WatchdogNotifyPolicy: Sendable {
         }
     }
 
+    public static func inFlight(_ delivery: String) -> Bool { delivery == "queued" }
+
+    public static func retryable(_ delivery: String) -> Bool {
+        delivery == "failed" || delivery == "denied"
+    }
+
     public static func decision(severity: WatchdogSeverity, openedEpisode: Bool,
                                 safety: Bool, previousSafety: Bool,
                                 fused: Double, previousFused: Double,
@@ -316,15 +322,22 @@ public enum WatchdogNotifyPolicy: Sendable {
                                 episodeId: String? = nil,
                                 notifiedSevereEpisodeId: String = "",
                                 lastNotifiedAt: Int? = nil,
-                                nowUnix: Int = 0) -> (Bool, String) {
+                                nowUnix: Int = 0,
+                                notifyDelivery: String = "") -> (Bool, String) {
         _ = fused
         _ = previousFused
         _ = openedEpisode
+        if inFlight(notifyDelivery) { return (false, "in-flight") }
         let safetyEdge = safety && !previousSafety
         guard severity == .severe || safetyEdge else { return (false, "not-severe") }
         let eid = episodeId ?? ""
         let firstSevere = notifiedSevereEpisodeId.isEmpty
             || (!eid.isEmpty && notifiedSevereEpisodeId != eid)
+        if firstSevere, retryable(notifyDelivery) {
+            let cooled = lastNotifiedAt.map { nowUnix - $0 >= WatchdogConfig.notifyCooldownSeconds } ?? true
+            if !cooled { return (false, "retry-wait") }
+            return (true, "retry")
+        }
         if firstSevere {
             return (true, safetyEdge ? "safety" : "first-severe")
         }

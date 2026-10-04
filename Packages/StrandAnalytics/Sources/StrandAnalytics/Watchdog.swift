@@ -837,12 +837,13 @@ public enum Watchdog {
                                                             episodeId: carry.episodeId,
                                                             notifiedSevereEpisodeId: carry.notifiedSevereEpisodeId,
                                                             lastNotifiedAt: carry.lastNotifiedAt,
-                                                            nowUnix: nowUnix)
+                                                            nowUnix: nowUnix,
+                                                            notifyDelivery: carry.notifyDelivery)
         let allowNotify = notify && liveAlerts
         if allowNotify {
             carry.lastNotifiedAt = nowUnix
             carry.notifyDelivery = "queued"
-            if severity == .severe, let eid = carry.episodeId { carry.notifiedSevereEpisodeId = eid }
+            // notifiedSevereEpisodeId is stamped only after a successful send.
         }
         carry.lastJointEnergy = reconJ
         carry.lastReconEnergy = labelJ
@@ -1374,6 +1375,7 @@ public enum Watchdog {
     /// Thin UniTS window still pages when a fresh still-rest vital is out of range.
     static func safetyDuringQualityFail(window: WatchdogWindow, nowUnix: Int, interval: Int,
                                         carry: WatchdogCarry, liveAlerts: Bool) -> WatchdogResult {
+        let previousSafety = carry.lastSafety
         var carry = carry
         rememberSafety(hit: safetyHit(window: window), nowUnix: nowUnix, carry: &carry)
         carry.lastSafety = true
@@ -1381,12 +1383,21 @@ public enum Watchdog {
         if carry.episodeId == nil {
             carry.episodeId = "wd-safety-\(nowUnix)"
         }
-        let first = carry.notifiedSevereEpisodeId != (carry.episodeId ?? "")
-        let notify = liveAlerts && first
+        let (want, reason) = WatchdogNotifyPolicy.decision(
+            severity: .severe, openedEpisode: carry.episodeId != nil,
+            safety: true, previousSafety: previousSafety,
+            fused: WatchdogCalibration.tSevere, previousFused: 0,
+            recon: WatchdogCalibration.tSevere, previousRecon: 0,
+            eventLabel: .safetyBound,
+            episodeId: carry.episodeId,
+            notifiedSevereEpisodeId: carry.notifiedSevereEpisodeId,
+            lastNotifiedAt: carry.lastNotifiedAt,
+            nowUnix: nowUnix,
+            notifyDelivery: carry.notifyDelivery)
+        let notify = liveAlerts && want
         if notify {
             carry.lastNotifiedAt = nowUnix
             carry.notifyDelivery = "queued"
-            if let eid = carry.episodeId { carry.notifiedSevereEpisodeId = eid }
         }
         carry.priorState = .active
         return WatchdogResult(
@@ -1434,7 +1445,7 @@ public enum Watchdog {
             forecastEnergy: 0,
             fusedEnergy: WatchdogCalibration.tSevere,
             promptSource: .population,
-            notifyReason: notify ? "safety" : "live-alerts-off",
+            notifyReason: notify ? reason : (liveAlerts ? reason : "live-alerts-off"),
             activityLabel: WatchdogActivityClass.unknown.rawValue,
             activityDetail: WatchdogActivityRuntime.displayName(WatchdogActivityClass.unknown.rawValue),
             sigmaAdaptive: false,

@@ -34,6 +34,7 @@ final class WatchdogService {
 
     func tick(inject: Watchdog.WatchdogInject? = nil, skipForecast: Bool = false) async {
         guard let model else { return }
+        if Task.isCancelled { return }
         if model.deviceId != boundDeviceId {
             liveHRRing = []
             liveRRRing = []
@@ -53,7 +54,9 @@ final class WatchdogService {
         } else {
             window = .failure(.empty)
         }
+        if Task.isCancelled { return }
         let sessions = await model.repo.watchdogSleepSessions(from: now - 20 * 3600, to: now + 3600, limit: 40)
+        if Task.isCancelled { return }
         let sleepIntervals = sessions.map {
             WatchdogSleepInterval(startUnix: $0.effectiveStartTs, endUnix: $0.endTs)
         }
@@ -73,6 +76,7 @@ final class WatchdogService {
                                        sleepIntervals: sleepIntervals,
                                        skipForecast: skipForecast,
                                        liveAlerts: liveAlerts)
+        if Task.isCancelled { return }
         carry = result.carry
         persistCarry(deviceId: model.deviceId)
         if case .success(let built) = window,
@@ -83,11 +87,17 @@ final class WatchdogService {
                                               sleepIntervals: sleepIntervals)
         }
         model.baseline.applyWatchdog(result)
-        if result.shouldNotify {
+        if result.shouldNotify, !Task.isCancelled {
             WatchdogNotifier.post(result) { [weak self] delivery in
-                guard let self else { return }
+                guard let self, let model = self.model else { return }
                 self.carry.notifyDelivery = delivery
+                if delivery == "sent", let eid = self.carry.episodeId {
+                    self.carry.notifiedSevereEpisodeId = eid
+                }
                 self.persistCarry(deviceId: model.deviceId)
+                var shown = result
+                shown.carry = self.carry
+                model.baseline.applyWatchdog(shown)
             }
         }
     }

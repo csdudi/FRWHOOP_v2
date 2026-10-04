@@ -609,6 +609,14 @@ private struct WatchdogLiveSnapshot {
     static func decimals(for id: String) -> Int { id == "temp" ? 1 : 0 }
 
     static func certaintyCaption(_ result: WatchdogResult) -> String? {
+        switch result.carry.notifyDelivery {
+        case "denied":
+            return "Alert not delivered. Notifications are off — turn them on to retry."
+        case "failed":
+            return "Alert not delivered. Will retry."
+        default:
+            break
+        }
         if result.unavailable == .wristOff {
             return "Strap off. Not recovered."
         }

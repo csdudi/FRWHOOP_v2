@@ -433,6 +433,54 @@ final class WatchdogV40CloseoutTests: XCTestCase {
         let r = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
                                   nowUnix: 97_400_000, inject: .severe, liveAlerts: false)
         XCTAssertFalse(r.shouldNotify)
+        XCTAssertNotEqual(r.carry.notifyDelivery, "queued")
+    }
+
+    func testQueuedNotifyDoesNotDoublePage() {
+        let lab = WatchdogEventLabel.abnormalMultiDirection
+        let (again, reason) = WatchdogNotifyPolicy.decision(
+            severity: .severe, openedEpisode: false, safety: false, previousSafety: false,
+            fused: 2.5, previousFused: 2.5, recon: 2.5, previousRecon: 2.5,
+            eventLabel: lab, episodeId: "wd-1", notifiedSevereEpisodeId: "",
+            notifyDelivery: "queued")
+        XCTAssertFalse(again)
+        XCTAssertEqual(reason, "in-flight")
+    }
+
+    func testDeniedNotifyIsRetryableAfterCooldown() {
+        let lab = WatchdogEventLabel.abnormalMultiDirection
+        let t = 3_000_000
+        let (wait, rWait) = WatchdogNotifyPolicy.decision(
+            severity: .severe, openedEpisode: false, safety: false, previousSafety: false,
+            fused: 2.5, previousFused: 2.5, recon: 2.5, previousRecon: 2.5,
+            eventLabel: lab, episodeId: "wd-1", notifiedSevereEpisodeId: "",
+            lastNotifiedAt: t, nowUnix: t + 40, notifyDelivery: "denied")
+        XCTAssertFalse(wait)
+        XCTAssertEqual(rWait, "retry-wait")
+        let (retry, rRetry) = WatchdogNotifyPolicy.decision(
+            severity: .severe, openedEpisode: false, safety: false, previousSafety: false,
+            fused: 2.5, previousFused: 2.5, recon: 2.5, previousRecon: 2.5,
+            eventLabel: lab, episodeId: "wd-1", notifiedSevereEpisodeId: "",
+            lastNotifiedAt: t, nowUnix: t + WatchdogConfig.notifyCooldownSeconds,
+            notifyDelivery: "denied")
+        XCTAssertTrue(retry)
+        XCTAssertEqual(rRetry, "retry")
+        XCTAssertTrue(WatchdogNotifyPolicy.retryable("failed"))
+        XCTAssertFalse(WatchdogNotifyPolicy.retryable("sent"))
+    }
+
+    func testEvaluateDoesNotStampNotifiedUntilSent() {
+        let r = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
+                                  nowUnix: 97_410_000, inject: .severe)
+        XCTAssertTrue(r.shouldNotify)
+        XCTAssertEqual(r.carry.notifyDelivery, "queued")
+        XCTAssertTrue(r.carry.notifiedSevereEpisodeId.isEmpty)
+        var hold = r.carry
+        hold.notifyDelivery = "queued"
+        let again = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
+                                      nowUnix: 97_410_020, previous: hold, inject: .severe)
+        XCTAssertFalse(again.shouldNotify)
+        XCTAssertEqual(again.notifyReason, "in-flight")
     }
 
     func testMigrateLnHRVBucket() {

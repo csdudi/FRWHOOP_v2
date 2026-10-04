@@ -19,7 +19,7 @@ enum WatchdogNotifier {
         center.getNotificationSettings { settings in
             guard settings.authorizationStatus == .authorized
                     || settings.authorizationStatus == .provisional else {
-                delivery?("failed")
+                delivery?("denied")
                 return
             }
             let content = UNMutableNotificationContent()
