@@ -69,6 +69,10 @@ final class BaselineStore: ObservableObject {
     @Published var loggingDay: String
     @Published var trendsExpanded = false
     @Published var watchdogResult: WatchdogResult?
+    @Published var eventRecovery: WatchdogEventRecovery?
+    @Published var episodeAnnotations: [WatchdogEpisodeAnnotation] = []
+    @Published var episodeLedger: [WatchdogEpisodeLedgerRow] = []
+    @Published var showEpisodeNoteSheet = false
     @Published var liveIntervalMinutes: Int
     @Published var editingEventIndex: Int?
     @Published var trialExpanded = false
@@ -157,6 +161,74 @@ final class BaselineStore: ObservableObject {
 
     func applyWatchdog(_ result: WatchdogResult) {
         watchdogResult = result
+    }
+
+    func loadWatchdogSidecars(deviceId: String) {
+        eventRecovery = Self.decode(defaults.data(forKey: WatchdogEventRecovery.persistKey(deviceId: deviceId)))
+        episodeAnnotations = Self.decode(defaults.data(forKey: WatchdogEpisodeAnnotation.persistKey(deviceId: deviceId))) ?? []
+        episodeLedger = Self.decode(defaults.data(forKey: WatchdogEpisodeLedger.persistKey(deviceId: deviceId))) ?? []
+    }
+
+    /// After evaluate. Does not change severity, notify, or Layer 1 snapshots.
+    func ingestLiveSidecars(result: WatchdogResult, deviceId: String, nowUnix: Int,
+                            liveAlerts: Bool, evaluations: [LBEvaluation]) {
+        if liveAlerts {
+            let day = Self.dayKey(Date(timeIntervalSince1970: TimeInterval(nowUnix)))
+            if let opened = WatchdogEventRecovery.openIfNeeded(
+                existing: eventRecovery, episodeId: result.episodeId, deviceId: deviceId,
+                nowUnix: nowUnix, civilDay: day, evaluations: evaluations, liveAlerts: true) {
+                let hr = result.signals.first(where: { $0.name == "HR" })?.observed
+                let hrv = result.signals.first(where: { $0.name == "HRV" })?.observed
+                eventRecovery = WatchdogEventRecovery.step(
+                    opened, hrBpm: hr, hrvMs: hrv, nowUnix: nowUnix,
+                    unavailable: result.unavailable != nil)
+                persist(eventRecovery, key: WatchdogEventRecovery.persistKey(deviceId: deviceId))
+            }
+            episodeLedger = WatchdogEpisodeLedger.upsert(
+                rows: episodeLedger, result: result, deviceId: deviceId,
+                nowUnix: nowUnix, liveAlerts: true)
+            persist(episodeLedger, key: WatchdogEpisodeLedger.persistKey(deviceId: deviceId))
+        }
+    }
+
+    func noteAfterSent(episodeId: String, deviceId: String, eventUnix: Int, liveAlerts: Bool) {
+        episodeAnnotations = WatchdogEpisodeAnnotation.pendingIfNeeded(
+            existing: episodeAnnotations, episodeId: episodeId, deviceId: deviceId,
+            eventUnix: eventUnix, delivery: "sent", liveAlerts: liveAlerts)
+        persist(episodeAnnotations, key: WatchdogEpisodeAnnotation.persistKey(deviceId: deviceId))
+        showEpisodeNoteSheet = episodeAnnotations.contains {
+            $0.episodeId == episodeId && $0.status == .pending
+        }
+    }
+
+    func saveEpisodeNote(_ row: WatchdogEpisodeAnnotation, deviceId: String) {
+        episodeAnnotations = WatchdogEpisodeAnnotation.replace(episodeAnnotations, with: row)
+        persist(episodeAnnotations, key: WatchdogEpisodeAnnotation.persistKey(deviceId: deviceId))
+        showEpisodeNoteSheet = false
+    }
+
+    var pendingEpisodeNote: WatchdogEpisodeAnnotation? {
+        episodeAnnotations.first(where: { $0.status == .pending })
+    }
+
+    func clinicianExportText(deviceId: String, nowUnix: Int = Int(Date().timeIntervalSince1970)) -> String {
+        let start = nowUnix - 8 * 24 * 3600
+        let evals = [evaluation, longEvaluation].compactMap { $0 }
+        return WatchdogClinicianExport.build(
+            deviceId: deviceId, startUnix: start, endUnix: nowUnix,
+            ledger: episodeLedger, evaluations: evals, dayLogs: dayLogsByDay,
+            annotations: episodeAnnotations, recovery: eventRecovery).text
+    }
+
+    private func persist<T: Encodable>(_ value: T, key: String) {
+        if let data = try? JSONEncoder().encode(value) {
+            defaults.set(data, forKey: key)
+        }
+    }
+
+    private static func decode<T: Decodable>(_ data: Data?) -> T? {
+        guard let data else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
     }
 
     /// Usuals for every Watchdog vital, not only the series the patient currently has selected.

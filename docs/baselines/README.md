@@ -27,6 +27,7 @@ How they work:
 
 1. [Layer 1 — days and nights](LAYER1.md)
 2. [Watchdog — last 30 minutes](WATCHDOG.md)
+3. [Planned sidecars F04 / F08 / F09](ADDONS.md) — not shipped; must not change scoring
 
 App surfaces: **Baseline** tab (live card + long-term usuals), **Treatment** marking (Layer 1 freeze only after the wearer logs a start). Models stay frozen Core ML; there is no on-device training.
 

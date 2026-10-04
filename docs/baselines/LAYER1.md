@@ -66,6 +66,8 @@ The daily log can mark **took scheduled**, **missed scheduled**, or **another me
 
 The card never names a drug as the cause of a change.
 
+The **daily log** is the only wearer form that may set `confoundsUsual`. Planned F08 episode notes (after a Watchdog page) must **not** write this log. Planned F09 clinician export may **print** these days and the two usual copies; it must not average them or write snapshots. See [ADDONS.md](ADDONS.md).
+
 ## What Watchdog may use (read only)
 
 Watchdog **reads** a *shown* Layer 1 copy as an optional prompt (awake HR vs sleep RHR stay on separate copies; two copies are never averaged). A shown usual can raise live TRUST and supply a MAD floor for reconstruction σ. It does **not** gate the half-hour call: nights are not required before Watchdog can leave learning.

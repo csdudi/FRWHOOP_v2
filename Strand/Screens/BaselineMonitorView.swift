@@ -23,7 +23,14 @@ struct BaselineMonitorView: View {
             title: "Baseline",
             subtitle: LocalizedStringKey(store.subtitle),
             onRefresh: { await repo.refresh(); store.rescore(days: days) },
-            topBackground: liquidScaffoldSky()
+            topBackground: liquidScaffoldSky(),
+            trailing: {
+                ShareLink(item: store.clinicianExportText(deviceId: repo.deviceId)) {
+                    Image(systemName: "square.and.arrow.up")
+                        .foregroundStyle(StrandPalette.textSecondary)
+                }
+                .accessibilityLabel("Share 7-day summary for a clinician")
+            }
         ) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 WatchdogPlaceholderView(embedded: true)

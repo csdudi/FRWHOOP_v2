@@ -19,6 +19,7 @@ final class WatchdogService {
         self.model = model
         boundDeviceId = model.deviceId
         carry = loadCarry(deviceId: model.deviceId)
+        model.baseline.loadWatchdogSidecars(deviceId: model.deviceId)
         WatchdogNotifier.requestAuthorization()
         bindLive(model)
         loop?.cancel()
@@ -41,6 +42,7 @@ final class WatchdogService {
             lastRRSeq = -1
             boundDeviceId = model.deviceId
             carry = loadCarry(deviceId: model.deviceId)
+            model.baseline.loadWatchdogSidecars(deviceId: model.deviceId)
         }
         captureLive(model)
         let now = Int(Date().timeIntervalSince1970)
@@ -87,17 +89,25 @@ final class WatchdogService {
                                               sleepIntervals: sleepIntervals)
         }
         model.baseline.applyWatchdog(result)
+        model.baseline.ingestLiveSidecars(result: result, deviceId: model.deviceId,
+                                          nowUnix: now, liveAlerts: liveAlerts,
+                                          evaluations: promptEvals)
         if result.shouldNotify, !Task.isCancelled {
             WatchdogNotifier.post(result) { [weak self] delivery in
-                guard let self, let model = self.model else { return }
-                self.carry.notifyDelivery = delivery
-                if delivery == "sent", let eid = self.carry.episodeId {
-                    self.carry.notifiedSevereEpisodeId = eid
+                Task { @MainActor in
+                    guard let self, let model = self.model else { return }
+                    self.carry.notifyDelivery = delivery
+                    if delivery == "sent", let eid = self.carry.episodeId {
+                        self.carry.notifiedSevereEpisodeId = eid
+                        let opened = eid.split(separator: "-").last.flatMap { Int($0) } ?? now
+                        model.baseline.noteAfterSent(episodeId: eid, deviceId: model.deviceId,
+                                                     eventUnix: opened, liveAlerts: liveAlerts)
+                    }
+                    self.persistCarry(deviceId: model.deviceId)
+                    var shown = result
+                    shown.carry = self.carry
+                    model.baseline.applyWatchdog(shown)
                 }
-                self.persistCarry(deviceId: model.deviceId)
-                var shown = result
-                shown.carry = self.carry
-                model.baseline.applyWatchdog(shown)
             }
         }
     }

@@ -126,3 +126,4 @@ Live Watchdog only uses **30 minutes in** and **5 minutes out**, plus σ floors 
 | Day-tape ingest | `LBDayTape.swift` via `BaselineStore` |
 | Official convert attempt (fails; does not overwrite students) | `Tools/units-watchdog/export_official_coreml.py` |
 | Pins | `Packages/StrandAnalytics/Baseline/units/`, `WatchdogV40CloseoutTests`, `WatchdogStatisticsContractTests` |
+| Planned sidecars (not shipped) | [ADDONS.md](ADDONS.md) — F08 episode note after **sent**; F09 7-day clinician pack + ledger; F04 time-to-usual. No scoring change. |

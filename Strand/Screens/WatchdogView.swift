@@ -7,6 +7,7 @@ import StrandAnalytics
 @MainActor
 struct WatchdogPlaceholderView: View {
     @EnvironmentObject private var store: BaselineStore
+    @EnvironmentObject private var repo: Repository
     var embedded: Bool = false
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
@@ -43,11 +44,30 @@ struct WatchdogPlaceholderView: View {
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let recovery = store.eventRecovery, recovery.status != .noReference {
+                    Text(recovery.headline)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if store.pendingEpisodeNote != nil {
+                    Button("Add a note about the last alert") {
+                        store.showEpisodeNoteSheet = true
+                    }
+                    .font(StrandFont.caption.weight(.semibold))
+                    .foregroundStyle(StrandPalette.accent)
+                }
                 traitRows
             }
             .padding(.vertical, 4)
         }
         .onAppear { WatchdogNotifier.requestAuthorization() }
+        .sheet(isPresented: $store.showEpisodeNoteSheet) {
+            WatchdogEpisodeNoteSheet(deviceId: repo.deviceId) {
+                store.showEpisodeNoteSheet = false
+            }
+            .environmentObject(store)
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(snapshot.liveLabel). Live baseline")
     }
