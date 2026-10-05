@@ -430,6 +430,73 @@ final class WatchdogUniTSTests: XCTestCase {
         XCTAssertEqual(blended.last ?? nil, prior.last ?? nil)
     }
 
+    func testPaintRangeNeverNarrowerThanScoreScale() {
+        let score = Array(repeating: 6.0, count: 30)
+        var hat = Array(repeating: Optional(60.0), count: 30)
+        hat[20] = 90
+        let painted = UniTSRuntime.paintRange(
+            score: score, hat: hat, floor: 5, personal: 5, reconFraction: 0.12,
+            coupling: Array(repeating: 8.0, count: 30), companion: Array(repeating: 0, count: 30))
+        XCTAssertEqual(painted.count, 30)
+        for i in 0..<30 {
+            XCTAssertGreaterThanOrEqual(painted[i] + 1e-12, score[i])
+        }
+        XCTAssertGreaterThan(painted[20], score[20])
+    }
+
+    func testCompanionWidthUsesOtherHatsOnlyWithMotion() {
+        let hr = Array(repeating: Optional(90.0), count: 30)
+        let hrv = Array(repeating: Optional(20.0), count: 30)
+        let resp = Array(repeating: Optional(20.0), count: 30)
+        let prompt = UniTSPrompt(hr: 60, hrv: 50, resp: 14)
+        let rest = UniTSRuntime.companionScale(
+            hatHR: hr, hatHRV: hrv, hatResp: resp,
+            occupancy: Array(repeating: 0, count: 30), prompt: prompt)
+        XCTAssertEqual(rest.hr[15], 0, accuracy: 1e-9)
+        XCTAssertEqual(rest.hrv[15], 0, accuracy: 1e-9)
+        let walk = UniTSRuntime.companionScale(
+            hatHR: hr, hatHRV: hrv, hatResp: resp,
+            occupancy: Array(repeating: 1, count: 30), prompt: prompt)
+        XCTAssertGreaterThan(walk.hr[15], 5)
+        XCTAssertGreaterThan(walk.hrv[15], 2)
+        XCTAssertGreaterThan(walk.resp[15], 0.5)
+    }
+
+    func testFlatStudentSigmaUsesOccupancyPriorWidth() {
+        let flat = Array(repeating: 5.0, count: 30)
+        var prior = Array(repeating: 5.0, count: 30)
+        prior[10] = 8.0
+        prior[20] = 9.5
+        let out = UniTSRuntime.liveAdaptiveScale(model: flat, prior: prior)
+        XCTAssertEqual(out[10], 8.0, accuracy: 1e-9)
+        XCTAssertEqual(out[20], 9.5, accuracy: 1e-9)
+        var moving = flat
+        moving[5] = 5.0
+        moving[15] = 9.0
+        let kept = UniTSRuntime.liveAdaptiveScale(model: moving, prior: prior)
+        XCTAssertEqual(kept[15], 9.0, accuracy: 1e-9)
+    }
+
+    func testTempHatIsPersonalSkinNotPopulation33() {
+        let occ = Array(repeating: 0.0, count: 30)
+        var observed = Array(repeating: Optional<Double>.none, count: 30)
+        observed[4] = 32.2
+        observed[12] = 32.3
+        let noPrompt = UniTSRuntime.reconstructTemp(observed: observed, prompt: nil, occupancy: occ)
+        XCTAssertEqual(noPrompt[4] ?? -1, 32.2, accuracy: 0.08)
+        let sleep = UniTSRuntime.reconstructTemp(observed: observed, prompt: 33.4, occupancy: occ)
+        let seeded = sleep[4] ?? -1
+        XCTAssertGreaterThan(seeded, 32.2)
+        XCTAssertLessThan(seeded, 33.41)
+        XCTAssertLessThan(abs(seeded - 33.4), 0.35)
+        let flat: [Double?] = Array(repeating: 33.0, count: 30)
+        let prior = UniTSRuntime.reconstructTemp(observed: observed, prompt: nil, occupancy: occ)
+        let live = UniTSRuntime.liveTempHat(model: flat, prior: prior, observed: observed)
+        XCTAssertEqual(live[4] ?? -1, prior[4] ?? -1, accuracy: 1e-9)
+        XCTAssertEqual(WatchdogConfig.tempScale, 1.0, accuracy: 1e-12)
+        XCTAssertGreaterThan(WatchdogConfig.tempScale, abs(32.2 - 33.0))
+    }
+
     func testOneMinuteSpikeIsNotSevere() throws {
         let now = 7_000_000
         var feed = Watchdog.syntheticFeed(now: now, hr: 58, hrv: 48, temp: 33.1, resp: 14, motion: 0)

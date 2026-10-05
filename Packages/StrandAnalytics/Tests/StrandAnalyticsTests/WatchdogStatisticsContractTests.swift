@@ -9,7 +9,7 @@ final class WatchdogStatisticsContractTests: XCTestCase {
 
     private let prompt = UniTSPrompt(hr: 58, rhr: 58, hrv: 48, temp: 33.1, resp: 14, spo2: 97)
     private let usual = [58.0, 58.0, 48.0, 33.1, 14.0, 97.0]
-    private let scales = [5.0, 5.0, 8.0, 0.35, 3.0, 2.0]
+    private let scales = [5.0, 5.0, 8.0, 1.0, 3.0, 2.0]
 
     override func setUp() {
         super.setUp()
@@ -43,9 +43,12 @@ final class WatchdogStatisticsContractTests: XCTestCase {
         XCTAssertEqual(WatchdogScores.severityChannelCap, 1.0, accuracy: 1e-12)
         XCTAssertEqual(WatchdogScores.severityArtifactGain, 0.72, accuracy: 1e-12)
         XCTAssertEqual(WatchdogScores.rhrSeverityIndex, 1)
+        XCTAssertEqual(WatchdogPhysiologyAlert.minVitals, 2)
         XCTAssertEqual(WatchdogDirection.channelCount, 6)
         XCTAssertEqual(WatchdogDirection.beta, 1.0, accuracy: 1e-12)
         XCTAssertEqual(WatchdogBand.firstMinutes, 14)
+        XCTAssertEqual(WatchdogConfig.tempScale, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(WatchdogConfig.tempCenterAlpha, 0.28, accuracy: 1e-12)
         XCTAssertEqual(WatchdogBand.stepMax, 0.02, accuracy: 1e-12)
         XCTAssertEqual(WatchdogBand.shouldCountMinute(nowUnix: 100, lastUnix: 90), false)
         XCTAssertTrue(WatchdogBand.shouldCountMinute(nowUnix: 120, lastUnix: 59))
@@ -179,6 +182,15 @@ final class WatchdogStatisticsContractTests: XCTestCase {
         XCTAssertEqual(hr, 1.0, accuracy: 1e-12)
         XCTAssertEqual(hrRhr, hr, accuracy: 1e-12)
         XCTAssertLessThan(hr, WatchdogCalibration.tSevere)
+        let one = WatchdogPhysiologyAlert.marks(
+            absR: [1.2, 0, 0, 0, 0, 0],
+            mask: [true, false, false, false, false, false])
+        let two = WatchdogPhysiologyAlert.marks(
+            absR: [1.2, 0, 1.1, 0, 0, 0],
+            mask: [true, false, true, false, false, false])
+        XCTAssertFalse(WatchdogPhysiologyAlert.shouldAlert(marks: one, safety: false, personalOff: false))
+        XCTAssertFalse(WatchdogPhysiologyAlert.shouldAlert(marks: two, safety: false, personalOff: false))
+        XCTAssertTrue(WatchdogPhysiologyAlert.shouldAlert(marks: one, safety: true, personalOff: false))
     }
 
     func testPersistTwoTicksIsRequiredForModelSevere() {

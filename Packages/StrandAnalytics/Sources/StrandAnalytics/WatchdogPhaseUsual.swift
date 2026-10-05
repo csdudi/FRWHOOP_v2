@@ -63,6 +63,17 @@ public struct WatchdogPhaseUsualStore: Equatable, Sendable, Codable {
         }
     }
 
+    /// Band key for the 14-minute lock. Quiet unknown / no-IMU rest is still, not `.other`.
+    public static func bandFamily(label: WatchdogEventLabel, cls: WatchdogActivityClass,
+                                  tailPeriod: WatchdogPeriod) -> WatchdogActivityFamily {
+        let raw = family(label: label, cls: cls)
+        if raw == .other, WatchdogBand.learnable(label),
+           tailPeriod == .rest || tailPeriod == .unknown {
+            return .still
+        }
+        return raw
+    }
+
     public func mature(_ key: WatchdogPhaseKey) -> WatchdogPhaseEntry? {
         guard let e = entries[key.id], e.nDays >= Self.matureDays else { return nil }
         guard Self.isNativeVitalCenter(e.center) else { return nil }

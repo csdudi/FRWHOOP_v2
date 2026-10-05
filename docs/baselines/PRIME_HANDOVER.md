@@ -96,7 +96,8 @@ Code: `Watchdog.swift` `evaluate`. Window / quality: `WatchdogWindow`, `Watchdog
 | Live line | Observed minutes. Empty minutes stay empty. Appears as soon as that vital has a finite sample in the window (often the first tick if 30 minutes already exist on the phone). |
 | Dotted hat | \(\hat{x}\) from UniTS student or Swift prior. Not Layer 1 center. |
 | Green band | \(\hat{x} \pm \sigma\) after **14 present minutes of that channel** on the current phase×activity key. Per-vital `nPresent`. Missing temp does not inherit HR ready. Same civil minute does not increment `n`. |
-| σ | \(\max(\text{floor},\ \text{optional shown Layer 1 MAD},\ |\hat{x}|\times\text{reconFraction},\ \text{motion})\). Not this window’s residual scatter. Not Layer 1 \(k \times\) MAD. |
+| σ (Off / residual) | \(\max(\text{floor},\ \text{optional shown Layer 1 MAD},\ |\hat{x}|\times\text{reconFraction},\ \text{motion})\). Not this window’s residual scatter. Not Layer 1 \(k \times\) MAD. |
+| σ (painted corridor) | `UniTSRuntime.paintRanges` only. Never narrower than residual σ. May widen from occupancy prior (if student σ is a flat rail) and companion hats **while occupancy is up**. Rest isolation does not borrow width. Does not enter `severity`. |
 | Learning freeze | Band / sidecar / rest tape learn only when `shouldTrainUsual`: quality ok, not confounded, not candidate/active/severe, not personal-off. Post-workout 20 min is not learnable still. Walk key does not write still key. |
 | Clocks | Per-vital freshness (HR packet clock; HRV 5 min; temp 8 min; resp / SpO₂ 6 min). Stale wiped **before** models. Missing is nil, not 0. |
 | Activity | 20-col row. Unknown is not walk. First exercise family holds 120 s. Sleep from interval or last fresh col-19, not wall clock. |
@@ -105,7 +106,7 @@ Code: `Watchdog.swift` `evaluate`. Window / quality: `WatchdogWindow`, `Watchdog
 | Personal-off | Last fresh **native** HR / HRV vs logged felt-ill freeze or shown **60-day** usual. Never walking 7-day. Never UniTS hat. Sustained personal-off is **candidate** even if the hat is quiet. |
 | Safety | Still-rest **extrema** (HR max/min, not minute mean). Out-of-band RMSSD kept. Duration held across thin / UniTS-fail ticks. Thin window still runs safety. |
 | Live Off | `severity ≥ candidate` **or** safety **or** personal-off. Not Layer 1 HOW OFF. Not “last point outside the painted band.” |
-| Notify | First severe of an episode pages once **after sent**. Persist / recovery = new valid observation minutes. Missing pauses recovery, does not resolve. Escalate needs a larger jump **and** 30 quiet minutes. Backfill / `liveAlerts: false` cannot notify. |
+| Notify | First severe of an episode pages once **after sent**. Persist / recovery = new valid observation minutes. Missing pauses recovery, does not resolve. Escalate needs a larger jump **and** 30 quiet minutes. Backfill / `liveAlerts: false` cannot notify. **Also** `WatchdogPhysiologyAlert`: page only if safety extrema **or** three vitals outside their own hats with two at `tActive`. One/two mild outsides and personal-off alone do not page. |
 | Day tape | After tick, unique gated minutes → `LBDayTape` only if `shouldTrainUsual`. Sleep never writes `awakeRest*`. Observations, not snapshot write. |
 | Carry | `v2.{deviceId}`. Switching straps clears live rings. v1 blob is not cloned onto a new id. |
 | TRUST | \(50U + 35C + 15E\). Below 35 the row stays learning and does not call off. Sparse TRUST (temp / resp / SpO₂) sticks until **that** vital’s last observation changes. Layer 1 nights are **not** required to leave learning. |
@@ -114,10 +115,26 @@ Code: `Watchdog.swift` `evaluate`. Window / quality: `WatchdogWindow`, `Watchdog
 ### Display (first card on Baseline)
 
 - Status **Live** while the channel is still counting toward 14 minutes.
-- Same graph always: solid live line + faint dotted hat if quality allows.
-- Green fill and hi/lo range **only** when `channelBandReady` and TRUST ≥ 35.
-- Caption states remaining good HR minutes (`14 − presentMinutes(0)`).
+- Same graph always: **green corridor is only the model band**. Live line + **every past point** stay on the 30-minute strip; a reading is warning/critical only when that minute sits outside **that minute’s** \(\hat{x}\pm\sigma\).
+- Range caption is always the painted hi/lo when a width exists. **In range / Off** on a row is that vital vs **its own** band (`callReady` = 14 present + TRUST ≥ 35). One yellow HR does not rewrite the other five.
+- Caption states remaining good HR minutes (`14 − presentMinutes(0)`). `presentMinutes` reads `lastBandKey`; if that key is empty, it may show the max stored `nPresent` (reopen), not a borrowed other vital.
 - Per-vital TRUST. No page TRUST headline.
+- Temp caption: wrist skin · personal usual (not core / not +4 °C).
+
+### 4 Oct evening — extra shipped rules (test these tonight)
+
+These do **not** go on the Rahul one-pager. Prime must still keep leftovers 1–10 green.
+
+| Rule | Contract | Pin |
+|---|---|---|
+| Stale temp (G6) | 8-min mask before UniTS; display / TRUST keep the 30-min unmasked strip until that sample leaves the window | `WatchdogPreHandoffSweepTests` stale-temp |
+| Chair still (G9) | Occupancy &lt; 0.32 and IMU dyn &lt; 0.22 → still, not walk. Quiet unknown + learnable still/sleep uses band family still | `testChairFidgetIsStillAndUnknownRestCountsForTheBand` |
+| Temp hat (G8) | Personal skin setpoint (sleep seed or first sample), width floor 1.0 °C. Student hat span &lt; 0.15 °C → prior | `testTempHatIsPersonalSkinNotPopulation33` |
+| Paint vs Off | `paintRange` ≥ residual σ. Companion width is occupancy-gated | `testPaintRangeNeverNarrowerThanScoreScale` |
+| Physiology page | Separate from graphs. Quiet / two mild vitals / personal-off → no page. Three + two at tActive, or safety → may page. First severe still once | `WatchdogPhysiologyAlertTests` |
+| Students | `units-ad-coreml-v3` / `timesfm3-student-v3`. TimesFM cannot Early or severe-notify | V40 / Statistics |
+
+Temp / resp / SpO₂ on WHOOP 5 v18 may stay empty (no `resp_rate_raw` / scored SpO₂ percent). That is ingest, not a Watchdog scoring bug.
 
 ### Timing the Prime agent should encode (not wall-clock sleep)
 
@@ -151,10 +168,12 @@ Re-pin leftovers 1–10 as **one file** with explicit names (do not rely only on
 
 ### Must-not
 
-- Do not rewrite `severity`, `fused`, `nextState`, `shouldTrainUsual`, `liveOff`, `NotifyPolicy`.
+- Do not rewrite `severity`, `fused`, `nextState`, `shouldTrainUsual`, `liveOff`, `NotifyPolicy`. Physiology page is a **sidecar** on `shouldNotify`, not a new Off number.
+- Do not merge the six vitals into one graph or one usual.
 - Do not label students official. Do not add TimesFM 3.0.
 - Do not infer treatment start from HR.
 - Do not recover wrist-off into a green band.
+- Do not invent core body temp from wrist °C.
 
 ---
 
@@ -247,17 +266,19 @@ Must-hold:
 2. Add **one** new XCTest file per section (or one file with three `// MARK:` types):  
    `WatchdogPrimeHandoverLayer1Tests`, `WatchdogPrimeHandoverLiveTests`, `WatchdogPrimeHandoverAddonTests`.
 3. Prefer calling published APIs (`LongitudinalBaseline.evaluate`, `Watchdog.evaluate`, addon builders). Do not stub Off by painting a band miss.
-4. After the new file is green, run `WatchdogV40CloseoutTests`, `LongitudinalBaselineBiometricLogicTests`, and `WatchdogAddonSidecarTests` again. Any move is a revert.
+4. After the new file is green, run `WatchdogV40CloseoutTests`, `LongitudinalBaselineBiometricLogicTests`, `WatchdogAddonSidecarTests`, `WatchdogStatisticsContractTests`, and `WatchdogPhysiologyAlertTests` again. Any move is a revert.
 5. Do not commit unless asked. Do not push `main`.
 6. Charge, BLE pairing, and hosted `supabase/` push are **out of scope** for this Prime pass.
 
-### Suggested new pins (gaps as of 4 Oct)
+### Suggested new pins (gaps as of 4 Oct evening)
 
 | Section | Gap | Suggested name |
 |---|---|---|
-| Layer 1 | Ready vitals stay listed when another is building | `testReadinessMapDoesNotHideReadySeries` |
-| Layer 1 | Auto-land on ready; tap keeps unreadied series | `testPreferReadyDoesNotOverrideSelectSeries` |
+| Layer 1 | Ready vitals stay listed when another is building | `testReadinessMapDoesNotHideReadySeries` (shipped) |
+| Layer 1 | Auto-land on ready; tap keeps unreadied series | `testPreferReadyDoesNotOverrideSelectSeries` (shipped) |
 | Watchdog | 14 **minutes** not 14 ticks | already in V37 / V40; restate in handover file |
-| Watchdog | `presentMinutes` / `channelBandReady` per channel | `testChannelBandReadyIsPerVital` |
-| Watchdog | Live line exists before band ready | document-only unless UI tests are added; engine: hat + obs finite, `channelBandReady == false` |
+| Watchdog | `presentMinutes` / `channelBandReady` per channel | `testChannelBandReadyIsPerVital` (shipped) |
+| Watchdog | Live line exists before band ready | `testLiveLineExistsBeforeBandReady` (shipped) |
+| Watchdog | Quiet / two mild vitals do not page; extreme cluster or safety may | `WatchdogPhysiologyAlertTests` (shipped) |
+| Watchdog | Painted σ never narrower than residual σ | `testPaintRangeNeverNarrowerThanScoreScale` (shipped) |
 | F08/F09/F04 | Cross-hook: sent → pending; evaluate → ledger + recovery; hashes unchanged | `testSidecarHooksDoNotMoveEvaluate` |

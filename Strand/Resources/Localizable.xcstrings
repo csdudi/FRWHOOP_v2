@@ -138266,6 +138266,7 @@
       }
     },
     "now" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {

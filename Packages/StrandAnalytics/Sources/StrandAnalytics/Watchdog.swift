@@ -390,12 +390,16 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         sessionLastUnix = 0
     }
 
+    /// Minutes toward the green band for this vital.
+    /// Current key only. A set `lastBandKey` with no state is 0 (do not borrow still’s 14).
+    /// Empty `lastBandKey` (restart before the first tick) may use the stored max so reopen does not reset.
     public func presentMinutes(channel: Int) -> Int {
         guard channel >= 0 else { return 0 }
-        if let state = bandByKey[lastBandKey], channel < state.nPresent.count {
-            return state.nPresent[channel]
+        if lastBandKey.isEmpty {
+            return bandByKey.values.map { channel < $0.nPresent.count ? $0.nPresent[channel] : 0 }.max() ?? 0
         }
-        return bandByKey.values.map { channel < $0.nPresent.count ? $0.nPresent[channel] : 0 }.max() ?? 0
+        guard let state = bandByKey[lastBandKey], channel < state.nPresent.count else { return 0 }
+        return state.nPresent[channel]
     }
 
     public func channelBandReady(_ channel: Int) -> Bool {
@@ -481,6 +485,8 @@ public struct WatchdogResult: Equatable, Sendable, Codable {
     /// Same door as the live card **Off**: candidate+ / safety / personal-off. Not Layer 1 HOW OFF.
     public var liveOff: Bool
     public var personalOff: Bool
+    /// Holistic alert from per-vital labels. Not a change to any one graph.
+    public var physiologyOff: Bool
 }
 
 public enum Watchdog {
@@ -552,7 +558,8 @@ public enum Watchdog {
                 rememberSafety(hit: nil, nowUnix: nowUnix, carry: &carry)
                 return unavailable(.empty, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: carry)
             }
-            return combine(window: modelWin, residual: residual, prompt: livePrompt, evaluations: evaluations,
+            return combine(window: modelWin, display: win, residual: residual, prompt: livePrompt,
+                           evaluations: evaluations,
                            dayLog: dayLog, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: &carry,
                            sleepSessionOpen: sleepSessionOpen, skipForecast: skipForecast,
                            liveAlerts: liveAlerts)
@@ -599,6 +606,7 @@ public enum Watchdog {
     }
 
     static func combine(window: WatchdogWindow,
+                        display: WatchdogWindow? = nil,
                         residual: UniTSResidual,
                         prompt: UniTSPrompt,
                         evaluations: [LBEvaluation],
@@ -609,6 +617,7 @@ public enum Watchdog {
                         sleepSessionOpen: Bool = false,
                         skipForecast: Bool = false,
                         liveAlerts: Bool = true) -> WatchdogResult {
+        let shown = display ?? window
         let confounded = dayLog?.confoundsUsual == true
         let tail = WatchdogLiveTail.resolve(window)
         if tail.lastEffortEndUnix > carry.lastWorkoutEndUnix {
@@ -797,6 +806,9 @@ public enum Watchdog {
         } || personalNativeOff(hrBpm: lastHR?.obs, hrvMs: lastHRV?.obs, evaluations: evaluations)
         let persistMinute = nowUnix - nowUnix % WatchdogConfig.gridSeconds
         let obsMinute = latestValidObsMinute(window: window)
+        let vitalMarks = WatchdogPhysiologyAlert.marks(absR: absR, mask: present)
+        let physiologyOff = WatchdogPhysiologyAlert.shouldAlert(
+            marks: vitalMarks, safety: safety, personalOff: personalOff)
         if persistMinute > carry.lastPersistMinute,
            let obs = obsMinute, obs > carry.lastPersistObsMinute {
             if reconJ >= WatchdogCalibration.tNote || personalOff {
@@ -851,7 +863,7 @@ public enum Watchdog {
                                                             lastNotifiedAt: carry.lastNotifiedAt,
                                                             nowUnix: nowUnix,
                                                             notifyDelivery: carry.notifyDelivery)
-        let allowNotify = notify && liveAlerts
+        let allowNotify = notify && liveAlerts && (safety || physiologyOff)
         if allowNotify {
             carry.lastNotifiedAt = nowUnix
             carry.notifyDelivery = "queued"
@@ -903,7 +915,7 @@ public enum Watchdog {
                                       persistTicks: persistTicks, hot: hot.contains("Temp"),
                                       hat: lastTemp?.hat),
             obs: lastTemp?.obs,
-            stillInWindow: window.temp.contains { $0 != nil },
+            stillInWindow: shown.temp.contains { $0 != nil },
             heldTrust: &carry.sparseTrust.tempTrust,
             heldObs: &carry.sparseTrust.tempObs)
         let trustResp = holdSparseTrust(
@@ -912,7 +924,7 @@ public enum Watchdog {
                                       persistTicks: persistTicks, hot: hot.contains("Resp"),
                                       hat: lastResp?.hat),
             obs: lastResp?.obs,
-            stillInWindow: window.resp.contains { $0 != nil },
+            stillInWindow: shown.resp.contains { $0 != nil },
             heldTrust: &carry.sparseTrust.respTrust,
             heldObs: &carry.sparseTrust.respObs)
         let trustSpO2 = holdSparseTrust(
@@ -921,13 +933,14 @@ public enum Watchdog {
                                       persistTicks: persistTicks, hot: hot.contains("SpO2"),
                                       hat: lastSpO2?.hat),
             obs: lastSpO2?.obs,
-            stillInWindow: window.spo2.contains { $0 != nil },
+            stillInWindow: shown.spo2.contains { $0 != nil },
             heldTrust: &carry.sparseTrust.spo2Trust,
             heldObs: &carry.sparseTrust.spo2Obs)
 
         let sessionPhase = WatchdogPhaseUsualStore.phase(nowUnix: nowUnix,
                                                         sleepBit: sleepSessionOpen || sleepBit)
-        let bandFam = WatchdogPhaseUsualStore.family(label: eventHint, cls: cls)
+        let bandFam = WatchdogPhaseUsualStore.bandFamily(label: eventHint, cls: cls,
+                                                          tailPeriod: tail.period)
         let phaseKey = WatchdogPhaseKey(phase: sessionPhase, family: bandFam)
         carry.migrateLegacyBandIfNeeded(into: WatchdogPhaseKey(phase: sessionPhase, family: .still))
         if !carry.lastBandKey.isEmpty, carry.lastBandKey != phaseKey.id {
@@ -1065,13 +1078,13 @@ public enum Watchdog {
             .init(name: "HRV", observed: lastHRV?.obs, usual: prompt.hrvAwake ?? prompt.hrv,
                   reconstructed: lastHRV?.hat, energy: eHRV, unit: "ms", trustPct: trustHRV,
                   rangeHalf: adapted.rangeHalf(for: .hrv)),
-            .init(name: "Temp", observed: lastTemp?.obs, usual: prompt.temp,
+            .init(name: "Temp", observed: lastTemp?.obs ?? last(shown.temp), usual: prompt.temp,
                   reconstructed: lastTemp?.hat, energy: eTemp, unit: "°C", trustPct: trustTemp,
                   rangeHalf: adapted.rangeHalf(for: .temp)),
-            .init(name: "Resp", observed: lastResp?.obs, usual: prompt.resp,
+            .init(name: "Resp", observed: lastResp?.obs ?? last(shown.resp), usual: prompt.resp,
                   reconstructed: lastResp?.hat, energy: eResp, unit: "/min", trustPct: trustResp,
                   rangeHalf: adapted.rangeHalf(for: .resp)),
-            .init(name: "SpO2", observed: lastSpO2?.obs, usual: prompt.spo2,
+            .init(name: "SpO2", observed: lastSpO2?.obs ?? last(shown.spo2), usual: prompt.spo2,
                   reconstructed: lastSpO2?.hat, energy: eSpO2, unit: "%", trustPct: trustSpO2,
                   rangeHalf: adapted.rangeHalf(for: .spo2)),
             .init(name: "Motion", observed: last(window.motion), usual: nil,
@@ -1128,6 +1141,9 @@ public enum Watchdog {
             copy = (copy.headline, "Several readings moving together · not a diagnosis")
         }
 
+        let painted = UniTSRuntime.paintRanges(
+            residual: adapted, occupancy: UniTSRuntime.occupancy(shown), prompt: prompt)
+
         return WatchdogResult(
             severity: severity,
             episodeState: state,
@@ -1143,24 +1159,24 @@ public enum Watchdog {
             family: window.family.rawValue,
             lastTickUnix: nowUnix,
             windowStartUnix: window.startUnix,
-            horizonHR: window.hr.map { $0 ?? .nan },
-            horizonHRV: window.hrv.map { $0 ?? .nan },
-            horizonTemp: window.temp.map { $0 ?? .nan },
-            horizonResp: window.resp.map { $0 ?? .nan },
-            horizonRHR: window.rhr.map { $0 ?? .nan },
-            horizonSpO2: window.spo2.map { $0 ?? .nan },
+            horizonHR: shown.hr.map { $0 ?? .nan },
+            horizonHRV: shown.hrv.map { $0 ?? .nan },
+            horizonTemp: shown.temp.map { $0 ?? .nan },
+            horizonResp: shown.resp.map { $0 ?? .nan },
+            horizonRHR: shown.rhr.map { $0 ?? .nan },
+            horizonSpO2: shown.spo2.map { $0 ?? .nan },
             reconstructedHR: adapted.reconstructedHR.map { $0 ?? .nan },
             reconstructedHRV: adapted.reconstructedHRV.map { $0 ?? .nan },
             reconstructedTemp: adapted.reconstructedTemp.map { $0 ?? .nan },
             reconstructedResp: adapted.reconstructedResp.map { $0 ?? .nan },
             reconstructedRHR: adapted.reconstructedRHR.map { $0 ?? .nan },
             reconstructedSpO2: adapted.reconstructedSpO2.map { $0 ?? .nan },
-            rangeHR: adapted.scaleHR,
-            rangeHRV: adapted.scaleHRV,
-            rangeTemp: adapted.scaleTemp,
-            rangeResp: adapted.scaleResp,
-            rangeRHR: adapted.scaleRHR,
-            rangeSpO2: adapted.scaleSpO2,
+            rangeHR: painted.hr,
+            rangeHRV: painted.hrv,
+            rangeTemp: painted.temp,
+            rangeResp: painted.resp,
+            rangeRHR: painted.rhr,
+            rangeSpO2: painted.spo2,
             signals: signals,
             contributing: hot,
             qualityLine: String(format: "HR fill %.0f%% · %@ · %@ · tick %ds",
@@ -1194,7 +1210,8 @@ public enum Watchdog {
             eventExplained: decision.explained,
             forecastSource: forecast.source,
             liveOff: liveOff(severity: severity, safety: safety, personalOff: personalOff),
-            personalOff: personalOff
+            personalOff: personalOff,
+            physiologyOff: physiologyOff
         )
     }
 
@@ -1472,7 +1489,8 @@ public enum Watchdog {
             eventExplained: false,
             forecastSource: "hold",
             liveOff: true,
-            personalOff: false
+            personalOff: false,
+            physiologyOff: true
         )
     }
 
@@ -1648,7 +1666,8 @@ public enum Watchdog {
             eventExplained: false,
             forecastSource: "hold",
             liveOff: false,
-            personalOff: false
+            personalOff: false,
+            physiologyOff: false
         )
     }
 

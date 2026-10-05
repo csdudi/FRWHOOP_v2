@@ -242,7 +242,9 @@ public struct UniTSRuntime: Sendable {
         let modelHRV = hat(2, valid: bases[2] != nil)
         let priorHRV = reconstructHRV(observed: window.hrv, prompt: prompt, occupancy: occupancy)
         let hatHRV = liveHrvHat(model: modelHRV, prior: priorHRV, observed: window.hrv)
-        let hatTemp = hat(3, valid: bases[3] != nil)
+        let modelTemp = hat(3, valid: bases[3] != nil)
+        let priorTemp = reconstructTemp(observed: window.temp, prompt: prompt.temp, occupancy: occupancy)
+        let hatTemp = liveTempHat(model: modelTemp, prior: priorTemp, observed: window.temp)
         let hatResp = hat(4, valid: bases[4] != nil)
         let hatSpO2 = hat(5, valid: bases[5] != nil)
         return finishResidual(
@@ -476,14 +478,154 @@ public struct UniTSRuntime: Sendable {
         return model
     }
 
-    /// Wrist skin temp: activity *decreases* expected WT (masking), lagged, then EMA.
+    /// Personal wrist-skin setpoint (same *structure* as a body-temp usual: your center,
+    /// relative change, realistic width). Still °C at the wrist — not core, not wrist+4.
+    /// Sleep prompt seeds if shown; otherwise the first finite sample *is* the center.
+    /// This window’s skin then updates the center. Activity still lowers expected skin.
     static func reconstructTemp(observed: [Double?], prompt: Double?, occupancy: [Double]) -> [Double?] {
         let lagged = trailingMean(occupancy, taps: WatchdogConfig.tempLagMinutes)
-        let base = prompt ?? WatchdogPopulationPriors.temp
-        let target: [Double?] = zip(observed, lagged).map { _, occ in
-            return clamp(base + WatchdogConfig.tempMotionGain * occ, lo: 28, hi: 38)
+        let seed = prompt ?? WatchdogPopulationPriors.temp
+        let center = shortTermTempCenter(observed: observed, seed: seed, hasPrompt: prompt != nil)
+        let target: [Double?] = zip(center, lagged).map { rest, occ in
+            guard let rest else { return nil }
+            return clamp(rest + WatchdogConfig.tempMotionGain * occ, lo: 28, hi: 38)
         }
         return track(target, alpha: WatchdogConfig.tempTrackAlpha)
+    }
+
+    /// Causal personal skin center. Nil until the first sample when there is no Layer 1 usual,
+    /// so a 32.2 °C wrist is not judged against population 33.0.
+    static func shortTermTempCenter(observed: [Double?], seed: Double, hasPrompt: Bool) -> [Double?] {
+        let a = WatchdogConfig.tempCenterAlpha
+        var last: Double? = hasPrompt ? seed : nil
+        return observed.map { value in
+            if let value, value.isFinite {
+                if let prev = last {
+                    last = (1 - a) * prev + a * value
+                } else {
+                    last = value
+                }
+            }
+            return last
+        }
+    }
+
+    /// Painted corridor only. Never narrower than the Off residual scale.
+    public static func paintRange(score: [Double], hat: [Double?],
+                                 floor: Double, personal: Double,
+                                 reconFraction: Double, coupling: [Double],
+                                 companion: [Double]) -> [Double] {
+        let prior = predictedScale(hat: hat, floor: floor, personal: personal,
+                                   reconFraction: reconFraction, coupling: coupling)
+        return zipMax(zipMax(score, liveAdaptiveScale(model: score, prior: prior)), companion)
+    }
+
+    public static func paintRanges(residual: UniTSResidual, occupancy: [Double],
+                                  prompt: UniTSPrompt)
+    -> (hr: [Double], rhr: [Double], hrv: [Double], temp: [Double], resp: [Double], spo2: [Double]) {
+        let hrBase = prompt.hr ?? WatchdogPopulationPriors.hr
+        let hrvBase = prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv
+        let respBase = prompt.resp ?? WatchdogPopulationPriors.resp
+        let hrSmooth = trailingMean(occupancy, taps: WatchdogConfig.hrMotionSmoothMinutes)
+        let hrvSmooth = trailingMean(occupancy, taps: WatchdogConfig.hrvMotionSmoothMinutes)
+        let tempLag = trailingMean(occupancy, taps: WatchdogConfig.tempLagMinutes)
+        let respSmooth = trailingMean(occupancy, taps: WatchdogConfig.respSmoothMinutes)
+        let companions = companionScale(
+            hatHR: residual.reconstructedHR, hatHRV: residual.reconstructedHRV,
+            hatResp: residual.reconstructedResp, occupancy: occupancy, prompt: prompt)
+        return (
+            paintRange(score: residual.scaleHR, hat: residual.reconstructedHR,
+                       floor: WatchdogConfig.hrScale, personal: prompt.scaleHR,
+                       reconFraction: WatchdogConfig.hrReconFraction,
+                       coupling: hrSmooth.map { WatchdogConfig.hrEffortUncert * hrBase * pow(max(0, $0), WatchdogConfig.hrMotionPower) },
+                       companion: companions.hr),
+            paintRange(score: residual.scaleRHR, hat: residual.reconstructedRHR,
+                       floor: WatchdogConfig.hrScale, personal: prompt.scaleRHR,
+                       reconFraction: WatchdogConfig.rhrReconFraction,
+                       coupling: Array(repeating: 0, count: residual.scaleRHR.count),
+                       companion: Array(repeating: 0, count: residual.scaleRHR.count)),
+            paintRange(score: residual.scaleHRV, hat: residual.reconstructedHRV,
+                       floor: WatchdogConfig.hrvScale, personal: prompt.scaleHRV,
+                       reconFraction: WatchdogConfig.hrvReconFraction,
+                       coupling: hrvSmooth.map { WatchdogConfig.hrvDropUncertMs * $0 * (hrvBase / WatchdogConfig.hrvDropRefMs) },
+                       companion: companions.hrv),
+            paintRange(score: residual.scaleTemp, hat: residual.reconstructedTemp,
+                       floor: WatchdogConfig.tempScale, personal: prompt.scaleTemp,
+                       reconFraction: WatchdogConfig.tempReconFraction,
+                       coupling: tempLag.map { WatchdogConfig.tempGainUncert * $0 },
+                       companion: companions.temp),
+            paintRange(score: residual.scaleResp, hat: residual.reconstructedResp,
+                       floor: WatchdogConfig.respScale, personal: prompt.scaleResp,
+                       reconFraction: WatchdogConfig.respReconFraction,
+                       coupling: respSmooth.map { WatchdogConfig.respEffortUncert * respBase * pow(max(0, $0), WatchdogConfig.respMotionPower) },
+                       companion: companions.resp),
+            paintRange(score: residual.scaleSpO2, hat: residual.reconstructedSpO2,
+                       floor: WatchdogConfig.spo2Scale, personal: prompt.scaleSpO2,
+                       reconFraction: WatchdogConfig.spo2ReconFraction,
+                       coupling: Array(repeating: 0, count: residual.scaleSpO2.count),
+                       companion: Array(repeating: 0, count: residual.scaleSpO2.count))
+        )
+    }
+
+    /// Motion-gated companion widths. A rest HRV crash does not widen HR.
+    public static func companionScale(hatHR: [Double?], hatHRV: [Double?], hatResp: [Double?],
+                               occupancy: [Double], prompt: UniTSPrompt)
+    -> (hr: [Double], hrv: [Double], temp: [Double], resp: [Double]) {
+        let n = WatchdogConfig.seqLen
+        let hrBase = prompt.hr ?? WatchdogPopulationPriors.hr
+        let hrvBase = prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv
+        let respBase = prompt.resp ?? WatchdogPopulationPriors.resp
+        let occ = occupancy.count >= n ? occupancy : occupancy + Array(repeating: occupancy.last ?? 0,
+                                                                       count: max(0, n - occupancy.count))
+        var hr = Array(repeating: 0.0, count: n)
+        var hrv = Array(repeating: 0.0, count: n)
+        var temp = Array(repeating: 0.0, count: n)
+        var resp = Array(repeating: 0.0, count: n)
+        for i in 0..<n {
+            let o = max(0, min(1, occ[i]))
+            let hrvHat = i < hatHRV.count ? hatHRV[i] : nil
+            let hrHat = i < hatHR.count ? hatHR[i] : nil
+            let respHat = i < hatResp.count ? hatResp[i] : nil
+            let hrvDrop = max(0, (hrvBase - (hrvHat ?? hrvBase)) / max(hrvBase, 1))
+            let hrLift = max(0, ((hrHat ?? hrBase) - hrBase) / max(hrBase, 1))
+            let respLift = max(0, ((respHat ?? respBase) - respBase) / max(respBase, 1))
+            hr[i] = WatchdogConfig.hrvToHrUncert * hrvDrop * hrBase * o
+                + WatchdogConfig.hrToRespUncert * respLift * hrBase * o
+            hrv[i] = WatchdogConfig.hrToHrvUncert * hrLift * hrvBase * o
+            temp[i] = WatchdogConfig.hrToTempUncert * hrLift * o
+            resp[i] = WatchdogConfig.hrToRespUncert * hrLift * respBase * o
+        }
+        return (hr, hrv, temp, resp)
+    }
+
+    static func zipMax(_ a: [Double], _ b: [Double]) -> [Double] {
+        let n = max(a.count, b.count)
+        return (0..<n).map { i in
+            max(i < a.count ? a[i] : 0, i < b.count ? b[i] : 0)
+        }
+    }
+
+    /// Student σ is often a flat rail. If it barely moves, use the occupancy / |hat| prior
+    /// (same width logic as live HRV).
+    static func liveAdaptiveScale(model: [Double], prior: [Double]) -> [Double] {
+        let finite = model.filter { $0.isFinite && $0 > 0 }
+        guard finite.count >= 8, prior.count == model.count, !prior.isEmpty else {
+            return prior.count == model.count && !prior.isEmpty ? prior : model
+        }
+        let lo = finite.min() ?? 0
+        let hi = finite.max() ?? 0
+        let mid = max((lo + hi) / 2, 0.01)
+        if (hi - lo) < max(0.12 * mid, 0.35) { return prior }
+        return model
+    }
+
+    static func liveTempHat(model: [Double?], prior: [Double?], observed: [Double?]) -> [Double?] {
+        let hats = model.compactMap { $0 }
+        let obs = observed.compactMap { $0 }
+        guard hats.count >= 8, obs.count >= 2 else { return prior }
+        let span = (hats.max() ?? 0) - (hats.min() ?? 0)
+        if span < WatchdogConfig.tempModelFlatSpanC { return prior }
+        return model
     }
 
     /// Breathing: this person's rest rate plus occupancy × 60% of that rest, then EMA.

@@ -169,9 +169,16 @@ public enum WatchdogActivityRuntime: Sendable {
         if occ > 0.45, let hr, abs(hr - 60) < 6, dynMean > 0.15 { return .artifact }
         if hasTicks && runF >= 0.45 { return .run }
         if hasTicks && walkF >= 0.45 { return .walk }
-        if hasTicks && stillF >= 0.55 && occ < 0.22 { return occ < 0.08 ? .still : .stand }
-        if occ < 0.07 && dynMean < 0.03 { return .still }
-        if occ < 0.14 && gravVar < 0.08 { return .stand }
+        if hasTicks && stillF >= 0.45 && occ < WatchdogConfig.chairStillOccupancy {
+            return occ < 0.14 ? .still : .stand
+        }
+        if !stepSport && occ < WatchdogConfig.chairStillOccupancy
+            && dynMean < WatchdogConfig.chairStillDynMean
+            && dynCV < 1.15 && windowDynCV < 0.80 {
+            return occ < 0.14 ? .still : .stand
+        }
+        if occ < 0.10 && dynMean < 0.08 { return .still }
+        if occ < 0.20 && gravVar < 0.16 { return .stand }
         if setRest && occ >= 0.18 && occ < 0.55 && walkF < 0.35 && runF < 0.35 {
             return .resistance
         }

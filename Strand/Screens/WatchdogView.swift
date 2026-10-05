@@ -133,7 +133,7 @@ struct WatchdogPlaceholderView: View {
                     WatchdogTraitStrip(values: row.series,
                                        reconstructed: row.reconstructed,
                                        usual: row.usualValue,
-                                       tint: row.tone,
+                                       tint: StrandPalette.textPrimary,
                                        minSpan: row.minSpan,
                                        decimals: row.decimals,
                                        rangeHalf: row.rangeHalf,
@@ -159,9 +159,7 @@ struct WatchdogPlaceholderView: View {
                             if let range = row.rangeLabel {
                                 Text(range)
                                     .font(StrandFont.caption)
-                                    .foregroundStyle(row.rangeReady
-                                                     ? StrandPalette.statusPositive
-                                                     : StrandPalette.textTertiary)
+                                    .foregroundStyle(StrandPalette.statusPositive)
                                     .monospacedDigit()
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.8)
@@ -198,16 +196,38 @@ private struct WatchdogTraitStrip: View {
     let rangeReady: Bool
     let pulsePeriod: Double
 
-    private var corridor: Color {
-        rangeReady ? StrandPalette.statusPositive : StrandPalette.textTertiary
-    }
-
     private func half(at index: Int) -> Double {
         if index >= 0, index < rangeSeries.count, rangeSeries[index].isFinite, rangeSeries[index] > 0 {
             return rangeSeries[index]
         }
         return rangeHalf
     }
+
+    private func hat(at index: Int) -> Double? {
+        if index >= 0, index < reconstructed.count, reconstructed[index].isFinite {
+            return reconstructed[index]
+        }
+        return usual
+    }
+
+    private func rangeOutside(at index: Int) -> Bool {
+        guard index >= 0, index < values.count, values[index].isFinite,
+              let center = hat(at: index) else { return false }
+        return abs(values[index] - center) > max(half(at: index), 0.001)
+    }
+
+    /// Live-line ink only. The green band stays the model corridor.
+    private func readingInk(at index: Int) -> Color {
+        guard rangeOutside(at: index), let center = hat(at: index),
+              index >= 0, index < values.count, values[index].isFinite else {
+            return tint
+        }
+        let width = max(half(at: index), 0.001)
+        let ratio = abs(values[index] - center) / width
+        return baselineOffColor(min(1, (ratio - 1) / max(WatchdogConfig.tauSevere, 0.5)))
+    }
+
+    private var corridor: Color { StrandPalette.statusPositive }
 
     private var observed: [(id: Double, y: Double)] {
         values.enumerated().compactMap { i, v in
@@ -224,6 +244,55 @@ private struct WatchdogTraitStrip: View {
         if !pts.isEmpty { return pts }
         guard let usual else { return [] }
         return observed.map { ($0.id, usual) }
+    }
+
+    /// Minute knots plus smoothstep samples so lo/hi follow each minute's model width.
+    private var ribbon: [(id: Double, y: Double, lo: Double, hi: Double)] {
+        let src = expected
+        guard !src.isEmpty else { return [] }
+        var out: [(id: Double, y: Double, lo: Double, hi: Double)] = []
+        func knot(_ p: (id: Double, y: Double)) -> (id: Double, y: Double, lo: Double, hi: Double) {
+            let w = max(half(at: Int(p.id.rounded())), 0)
+            return (p.id, p.y, p.y - w, p.y + w)
+        }
+        out.append(knot(src[0]))
+        guard src.count > 1 else { return out }
+        let steps = 6
+        for i in 1..<src.count {
+            let a = src[i - 1]
+            let b = src[i]
+            let aw = max(half(at: Int(a.id.rounded())), 0)
+            let bw = max(half(at: Int(b.id.rounded())), 0)
+            for s in 1...steps {
+                let t = Double(s) / Double(steps)
+                let u = t * t * (3 - 2 * t)
+                let id = a.id + (b.id - a.id) * u
+                let y = a.y + (b.y - a.y) * u
+                let w = aw + (bw - aw) * u
+                out.append((id, y, y - w, y + w))
+            }
+        }
+        return out
+    }
+
+    private var readingRuns: [(id: Int, ink: Color, points: [(id: Double, y: Double)])] {
+        var runs: [(id: Int, ink: Color, outside: Bool, points: [(id: Double, y: Double)])] = []
+        for (i, point) in observed.enumerated() {
+            let idx = Int(point.id.rounded())
+            let outside = rangeOutside(at: idx)
+            let ink = readingInk(at: idx)
+            if var last = runs.last, last.outside == outside {
+                last.points.append(point)
+                last.ink = ink
+                runs[runs.count - 1] = last
+            } else {
+                var pts: [(id: Double, y: Double)] = []
+                if i > 0 { pts.append(observed[i - 1]) }
+                pts.append(point)
+                runs.append((runs.count, ink, outside, pts))
+            }
+        }
+        return runs.map { ($0.id, $0.ink, $0.points) }
     }
 
     private var xDomain: ClosedRange<Double> {
@@ -248,10 +317,9 @@ private struct WatchdogTraitStrip: View {
     private var yDomain: ClosedRange<Double> {
         var ys = observed.map(\.y) + expected.map(\.y)
         if let usual { ys.append(usual) }
-        for point in expected {
-            let width = half(at: Int(point.id.rounded()))
-            ys.append(point.y - width)
-            ys.append(point.y + width)
+        for point in ribbon {
+            ys.append(point.lo)
+            ys.append(point.hi)
         }
         if let liveRange {
             ys.append(liveRange.lo)
@@ -289,45 +357,52 @@ private struct WatchdogTraitStrip: View {
 
     private func chart(flash: Bool) -> some View {
         Chart {
-            if rangeReady {
-                ForEach(expected, id: \.id) { point in
+            if !ribbon.isEmpty {
+                ForEach(Array(ribbon.enumerated()), id: \.offset) { _, point in
                     AreaMark(
                         x: .value("t", point.id),
-                        yStart: .value("v", point.y - half(at: Int(point.id.rounded()))),
-                        yEnd: .value("v", point.y + half(at: Int(point.id.rounded())))
+                        yStart: .value("v", point.lo),
+                        yEnd: .value("v", point.hi)
                     )
-                    .foregroundStyle(corridor.opacity(0.26))
-                    .interpolationMethod(.linear)
-                }
-                ForEach(expected, id: \.id) { point in
-                    LineMark(x: .value("t", point.id), y: .value("lo", point.y - half(at: Int(point.id.rounded()))),
+                    .foregroundStyle(corridor.opacity(0.28))
+                    .interpolationMethod(.catmullRom)
+                    LineMark(x: .value("t", point.id), y: .value("lo", point.lo),
                              series: .value("s", "lo"))
-                        .interpolationMethod(.linear)
-                        .foregroundStyle(corridor.opacity(0.55))
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                    LineMark(x: .value("t", point.id), y: .value("hi", point.y + half(at: Int(point.id.rounded()))),
+                        .interpolationMethod(.catmullRom)
+                        .foregroundStyle(corridor.opacity(0.85))
+                        .lineStyle(StrokeStyle(lineWidth: 1.4))
+                    LineMark(x: .value("t", point.id), y: .value("hi", point.hi),
                              series: .value("s", "hi"))
-                        .interpolationMethod(.linear)
+                        .interpolationMethod(.catmullRom)
+                        .foregroundStyle(corridor.opacity(0.85))
+                        .lineStyle(StrokeStyle(lineWidth: 1.4))
+                    LineMark(x: .value("t", point.id), y: .value("mid", point.y),
+                             series: .value("s", "usual"))
+                        .interpolationMethod(.catmullRom)
+                        .foregroundStyle(corridor.opacity(rangeReady ? 0.95 : 0.72))
+                        .lineStyle(StrokeStyle(lineWidth: rangeReady ? 2.0 : 1.5, dash: [5, 4]))
+                }
+            } else {
+                ForEach(expected, id: \.id) { point in
+                    LineMark(x: .value("t", point.id), y: .value("v", point.y), series: .value("s", "usual"))
+                        .interpolationMethod(.catmullRom)
                         .foregroundStyle(corridor.opacity(0.55))
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [5, 4]))
                 }
             }
-            ForEach(expected, id: \.id) { point in
-                LineMark(x: .value("t", point.id), y: .value("v", point.y), series: .value("s", "usual"))
-                    .interpolationMethod(.linear)
-                    .foregroundStyle(corridor.opacity(rangeReady ? 1 : 0.45))
-                    .lineStyle(StrokeStyle(lineWidth: rangeReady ? 2.2 : 1.4, dash: [5, 4]))
+            ForEach(readingRuns, id: \.id) { run in
+                ForEach(Array(run.points.enumerated()), id: \.offset) { _, point in
+                    LineMark(x: .value("t", point.id), y: .value("v", point.y),
+                             series: .value("s", "now-\(run.id)"))
+                        .interpolationMethod(.linear)
+                        .foregroundStyle(run.ink)
+                        .lineStyle(StrokeStyle(lineWidth: 2.3))
+                }
             }
             ForEach(observed, id: \.id) { point in
-                LineMark(x: .value("t", point.id), y: .value("v", point.y), series: .value("s", "now"))
-                    .interpolationMethod(.linear)
-                    .foregroundStyle(tint)
-                    .lineStyle(StrokeStyle(lineWidth: 2.2))
-            }
-            if let last = observed.last {
-                PointMark(x: .value("t", last.id), y: .value("v", last.y))
-                    .foregroundStyle(tint)
-                    .symbolSize(flash ? 34 : 22)
+                PointMark(x: .value("t", point.id), y: .value("v", point.y))
+                    .foregroundStyle(readingInk(at: Int(point.id.rounded())))
+                    .symbolSize(point.id == observed.last?.id ? (flash ? 34 : 22) : 8)
             }
         }
         .chartXScale(domain: xDomain)
@@ -344,7 +419,7 @@ private struct WatchdogTraitStrip: View {
         HStack(alignment: .center, spacing: 6) {
             plot
                 .frame(maxWidth: .infinity)
-                .frame(height: 58)
+                .frame(height: 72)
             if let liveRange {
                 VStack(alignment: .trailing, spacing: 0) {
                     Text(tickLabel(liveRange.hi))
@@ -431,7 +506,7 @@ private struct WatchdogLiveSnapshot {
                          bandReady: result.carry.channelBandReady(2)),
                 Self.row(id: "temp", name: "Temp", signal: temp, series: result.horizonTemp,
                          reconstructed: result.reconstructedTemp, rangeSeries: result.rangeTemp,
-                         caption: "Last 30 min", minSpan: 0.4, whoop5: whoop5,
+                         caption: "Wrist skin · personal usual", minSpan: 0.4, whoop5: whoop5,
                          fahrenheit: fahrenheit, trustPct: temp?.trustPct ?? 0, liveOff: result.liveOff,
                          channelHot: result.contributing.contains("Temp"),
                          bandReady: result.carry.channelBandReady(3)),
@@ -461,7 +536,7 @@ private struct WatchdogLiveSnapshot {
             Self.emptyRow(id: "hr", name: "Heart rate", caption: "Last 30 min", minSpan: 8, whoop5: whoop5),
             Self.emptyRow(id: "rhr", name: "Resting HR", caption: "Still minutes only", minSpan: 8, whoop5: whoop5),
             Self.emptyRow(id: "hrv", name: "HRV", caption: "5 min RMSSD", minSpan: 18, whoop5: whoop5),
-            Self.emptyRow(id: "temp", name: "Temp", caption: "Last 30 min", minSpan: 0.4, whoop5: whoop5,
+            Self.emptyRow(id: "temp", name: "Temp", caption: "Wrist skin · personal usual", minSpan: 0.4, whoop5: whoop5,
                           fahrenheit: fahrenheit),
             Self.emptyRow(id: "resp", name: "Breathing", caption: "Last 30 min", minSpan: 4, whoop5: whoop5),
             Self.emptyRow(id: "spo2", name: "SpO₂", caption: "When present", minSpan: 2, whoop5: whoop5)
@@ -532,7 +607,7 @@ private struct WatchdogLiveSnapshot {
         } else if !callReady {
             status = hasLive ? "Live" : "Learning"
             tone = StrandPalette.textSecondary
-        } else if liveOff && (outsideBand || channelHot) {
+        } else if outsideBand {
             let mag: Double
             if lastWidth > 0, let lastObs, let lastHat {
                 mag = min(1, abs(lastObs - lastHat) / max(lastWidth, 0.001) / WatchdogConfig.tauSevere)
@@ -545,22 +620,23 @@ private struct WatchdogLiveSnapshot {
             status = "In range"
             tone = StrandPalette.statusPositive
         }
+        let rangeCenter = lastHat ?? usual
         let rangeLabel: String? = {
-            guard let lastHat, lastWidth > 0 else { return nil }
+            guard let rangeCenter, lastWidth > 0 else { return nil }
             let dec = decimals(for: id)
-            let lo = format(lastHat - lastWidth, decimals: dec, unit: "")
-            let hi = format(lastHat + lastWidth, decimals: dec, unit: unit)
+            let lo = format(rangeCenter - lastWidth, decimals: dec, unit: "")
+            let hi = format(rangeCenter + lastWidth, decimals: dec, unit: unit)
             return "Range \(lo)–\(hi)"
         }()
         return MetricRow(id: id, name: name,
                          now: format(lastObs ?? now, decimals: decimals(for: id), unit: unit),
-                         expected: format(lastHat, decimals: decimals(for: id), unit: unit),
+                         expected: format(lastHat ?? usual, decimals: decimals(for: id), unit: unit),
                          status: status, tone: tone, series: series, reconstructed: reconstructed,
                          usualValue: lastHat ?? usual, windowCaption: caption, minSpan: minSpan,
                          decimals: decimals(for: id),
                          rangeHalf: lastWidth,
                          rangeSeries: rangeSeries,
-                         rangeLabel: callReady ? rangeLabel : nil, rangeReady: callReady, trustPct: trustPct,
+                         rangeLabel: rangeLabel, rangeReady: callReady, trustPct: trustPct,
                          pulsePeriod: whoopReadSeconds(id: id, whoop5: whoop5))
     }
 
@@ -648,14 +724,14 @@ private struct WatchdogLiveSnapshot {
 
     static func bandCaption(_ result: WatchdogResult?) -> String {
         guard let result, result.unavailable == nil else {
-            return "Live line can fill as soon as this half-hour has readings. The green band waits for 14 good minutes of that vital."
+            return "Live line and gray model range can fill as soon as this half-hour has readings. Green personal width waits for 14 good still minutes of that vital."
         }
         let n = result.carry.presentMinutes(channel: 0)
         let need = max(0, WatchdogBand.firstMinutes - n)
         if need == 0 {
             return "Heart-rate green band is on. Sparse vitals (temp, breathing, SpO₂) each need their own 14 good minutes."
         }
-        return "Live reading now. Green band after 14 good minutes of that vital — about \(need) more for heart rate. Temp is slower because samples are sparse."
+        return "Model range is on (gray). Green personal width after 14 good still minutes of that vital — about \(need) more for heart rate if the strap is labeling still."
     }
 
     static func certaintyCaption(_ result: WatchdogResult) -> String? {

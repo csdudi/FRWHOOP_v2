@@ -23,7 +23,9 @@ public enum WatchdogConfig: Sendable {
 
     public static let hrScale = 5.0
     public static let hrvScale = 8.0
-    public static let tempScale = 0.35
+    /// Wrist-skin half-width. Body-temp *structure* (personal usual ± a realistic delta),
+    /// not core °C. 0.35 was a tight rail vs ambient wrist noise (~1 °C).
+    public static let tempScale = 1.0
     public static let respScale = 3.0
     public static let spo2Scale = 2.0
     /// Occupancy 1.0 is treated as ~50% of this person's rest HR as a moderate-effort bump
@@ -32,6 +34,9 @@ public enum WatchdogConfig: Sendable {
     /// Linear occupancy so small motion changes show on the HR dotted line.
     public static let hrMotionPower = 1.0
     public static let hrMotionSmoothMinutes = 1
+    /// Occupancy / IMU below this is desk-still, not a walk. Chair fidget used to trip 0.15–0.18.
+    public static let chairStillOccupancy = 0.32
+    public static let chairStillDynMean = 0.22
     public static let hrTrackAlpha = 0.40
     /// Kept for inject/tests that add a round bpm bump; reconstruction uses `hrEffortFraction * rest`.
     public static let motionHrGain = 28.0
@@ -50,6 +55,10 @@ public enum WatchdogConfig: Sendable {
     public static let tempMotionGain = -0.15
     public static let tempLagMinutes = 6
     public static let tempTrackAlpha = 0.18
+    /// How fast this half-hour’s skin updates the personal setpoint (sleep prompt is the seed).
+    public static let tempCenterAlpha = 0.28
+    /// UniTS-AD hat span below this (°C) is treated as prompt-stuck; use the skin prior.
+    public static let tempModelFlatSpanC = 0.15
     /// Moderate effort, not VO2max. Resting rate is personal; occupancy 1 adds 60% of that rest rate.
     public static let respEffortFraction = 0.60
     public static let respMotionPower = 1.0
@@ -85,6 +94,12 @@ public enum WatchdogConfig: Sendable {
     /// Chen 2024 RMSSD MD 95% CI half-width at the 50 ms reference (~3.04 ms).
     public static let hrvDropUncertMs = 3.04
     public static let tempGainUncert = 0.10
+    /// Extra half-width from a companion vital, only while occupancy is up (explained effort).
+    /// Rest isolation stays a joint residual, not a wider band.
+    public static let hrvToHrUncert = 0.22
+    public static let hrToHrvUncert = 0.16
+    public static let hrToRespUncert = 0.12
+    public static let hrToTempUncert = 0.20
 
     public static let modelVersion = "units-ad-coreml-v3"
     public static let fallbackModelVersion = "units-ad-recon-v4"

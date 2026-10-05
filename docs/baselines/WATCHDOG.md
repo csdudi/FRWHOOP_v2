@@ -29,7 +29,7 @@ These are the live-engine rules from leftover close-out 1–10. Charge is not re
 | 6 | Personal-off is last fresh **native** HR / HRV vs the **logged felt-ill snapshot or 60-day** usual — never the walking 7-day, never the UniTS hat. Sustained personal-off is **candidate** even if the hat is quiet. Adaptation holds while Off or an episode is open. |
 | 7 | Safety is last still-rest **extrema** (HR max/min, not the minute mean). An out-of-band RMSSD is kept; a 3-tap median must not erase it. Duration is held across thin / UniTS-fail ticks. Wrist-off stays unavailable. |
 | 8 | First severe of an episode pages once. Persist and recovery advance on a **new valid observation minute**, not 20 s ticks or a held pair in a new wall minute. Missing data pauses recovery and does not resolve. Escalate needs a larger jump **and** 30 quiet minutes. |
-| 9 | Live **Off** = `severity ≥ candidate` or safety or personal-off. It is not Layer 1 HOW OFF and not “last point outside the painted band.” Sparse C is fresh minutes / 30, never 1.0 from one pair. Thresholds stay `prior-untuned`. |
+| 9 | Live **Off** = `severity ≥ candidate` or safety or personal-off. It is not Layer 1 HOW OFF and not “last point outside the painted band.” Sparse C is fresh minutes / 30, never 1.0 from one pair. Thresholds stay `prior-untuned`. Per-vital graphs stay independent. **Pages** use `WatchdogPhysiologyAlert`: safety extrema, or **three** vitals outside with **two** at tActive — not one/two mild outsides, not personal-off alone. |
 | 10 | Bundled graphs are **students** (`units-ad-coreml-v3` / `timesfm3-student-v3`). Not labelled official. Official Harvard UniTS / TimesFM 2.5 cannot ship today (Core ML convert fails; TimesFM 3.0 is license-banned). Wearer Early is shadow for student / hold. `present_mask` is a required Core ML input (1 = measured). A held forecast cube keeps emit clocks `now+60…now+300`; backcast scores those minutes. |
 
 ## Loop (on the phone)
@@ -51,9 +51,9 @@ These are the live-engine rules from leftover close-out 1–10. Charge is not re
 
 ## How each vital’s short-term baseline is calculated
 
-Every channel is reconstructed independently. The live line is **observed** (empty minutes stay empty). The dotted line is \(\hat{x}\). The corridor is \(\hat{x} \pm \sigma\), with
+Each vital still has its own hat. **Off / notify use the residual \(\sigma\)** (student or physics). The **painted** corridor may be wider — occupancy prior if student \(\sigma\) is flat, plus companion hats while occupancy is up. A rest isolation does not borrow width. Never narrower than the Off scale. The live line is **observed**. The dotted line is \(\hat{x}\).
 
-\[\sigma_t = \max(\text{floor},\ \text{optional Layer 1 MAD},\ |\hat{x}_t|\times\text{reconFraction},\ \text{motion uncertainty})\]
+\[\sigma^{\text{paint}}_t = \max(\sigma^{\text{score}}_t,\ \text{occupancy prior},\ \text{companion}\times\text{occ})\]
 
 That is **not** this window’s residual scatter and **not** Layer 1 \(k \times\) MAD. Gray until the phase×activity key is ready; then it may draw green.
 
@@ -62,7 +62,7 @@ That is **not** this window’s residual scatter and **not** Layer 1 \(k \times\
 | **Heart rate** | 1-minute mean of live / stored BPM | Rest prompt (Layer 1 awake HR, still sidecar, or population ~60) **plus** occupancy lift \(0.35 \times\) base \(\times\) occ | 5 bpm / 0.12 |
 | **Resting HR** | Still / stand minutes only. Walk, run, lift, cycle, artifact never enter. Packed across the plot so a short rest tail is not a sliver at t=29. | Rest prompt only (not a second HR graph) | 5 bpm / 0.07 |
 | **HRV** | 5-minute RMSSD on the minute grid (8 clean beats; 3-tap median). Jumpy one-minute tails are not a new usual. | **TimesFM is not this line** (forecast student only). UniTS-AD often reconstructs a flat prompt. Live hat = slow EMA of *this* window’s RMSSD (sleep/awake usual is only the seed), then occupancy drop. If UniTS hat span &lt; 4 ms, the card uses that short-term prior. | 8 ms / 0.22 |
-| **Temp** | Wrist skin °C (family-aware decode). Sparse — WHOOP writes it periodically, not every second. | Rest prompt ± lagged occupancy (activity **lowers** expected wrist temp) | 0.35 °C / 0 |
+| **Temp** | Wrist skin °C (family-aware decode). Sparse — WHOOP writes it periodically, not every second. **Not core / not body+offset.** Personal-setpoint logic: sleep usual seeds if shown; else the first finite skin sample is the center; this window then updates it. Activity still **lowers** expected wrist skin. | 1.0 °C / 0 |
 | **Breathing** | 1. `respSample` as a **rate** (Oura milli-bpm). 2. Else WHOOP `respSample` **waveform** → 5-minute peak-detector (`respRateAndRRV`). 3. Else RSA from beat-accurate R–R in 5-minute blocks (often empty while awake). | Rest prompt + occupancy \(\times\) 60% of that rest | 3 /min / 0.10 |
 | **SpO₂** | **Percent only** (50…110). Oura stores % in `red` (`ir = 0`). A percent-shaped `red` is kept even if IR is present. Raw WHOOP ADC pairs (thousands) are **not** converted with `red/ir` — that is not a percent. WHOOP 5 historical v18 has **no** `spo2_red` / `resp_rate_raw`; those graphs stay empty until a percent row exists. | Prompt or population, clamped 88…100. Motion is not a predicted desat. | 2 % / 0 |
 
@@ -95,7 +95,7 @@ Empty minutes stay empty. The card does not invent a line.
 
 A real push is extreme only: safety extrema, or a severe reconstruction that persists and is an abnormal / safety family. The **first** severe of an episode pages once **after the banner is sent**. `queued` is in-flight (no second page). `denied` (notifications off) and `failed` stay on the card and retry after the 30-minute cooldown. Persist and recovery count **new valid measurement minutes**, not 20 s ticks; missing data pauses recovery and does not resolve. After 15 in-range minutes the episode rearms. Not a diagnosis. No push for looking ahead, workouts, normal still/sleep, or history backfill. A cancelled background tick must not finish a page. Thresholds stay `prior-untuned` engineering defaults (1.0 / 1.6 / 2.4, persist 2 **minutes**) until a measured catalog is promoted.
 
-Live **Off** is Watchdog `severity ≥ candidate`, safety, or personal-off (`Watchdog.liveOff` / `result.liveOff`). It is **not** Layer 1 HOW OFF and **not** “last point outside the painted band” alone. A row may show Off only when that door is true and that channel is contributing. Quality line **HR fill** is the 30-minute HR window, not temp/breathing/SpO₂ C.
+Each vital’s corridor is its own Watchdog. A **separate** `WatchdogPhysiologyAlert` reads those in/out labels and pages only when two vitals are outside (or safety / personal-off). Live **Off** on leftover 9 is still `severity ≥ candidate`, safety, or personal-off. It is **not** Layer 1 HOW OFF. Quality line **HR fill** is the 30-minute HR window, not temp/breathing/SpO₂ C.
 
 ## What the wearer sees
 

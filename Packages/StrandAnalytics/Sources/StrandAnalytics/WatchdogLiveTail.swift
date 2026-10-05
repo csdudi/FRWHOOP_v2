@@ -57,11 +57,11 @@ public struct WatchdogLiveTail: Equatable, Sendable {
         if cls == .artifact { return .artifact }
         if WatchdogEventGeometry.isExercise(cls) { return .effort }
         if cls == .still || cls == .stand {
-            if let motion, motion >= 0.15 { return .effort }
+            if let motion, motion >= WatchdogConfig.chairStillOccupancy { return .effort }
             return .rest
         }
         if let motion {
-            return motion >= 0.15 ? .effort : .rest
+            return motion >= WatchdogConfig.chairStillOccupancy ? .effort : .rest
         }
         return .unknown
     }
